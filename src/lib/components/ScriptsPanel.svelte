@@ -3,6 +3,7 @@
 	import { invoke } from '@tauri-apps/api/core';
 	import { api } from '$lib/api/client';
 	import { backend } from '$lib/api/backend.svelte';
+	import { apiDebug } from '$lib/api/debug.svelte';
 	import type { ScriptMeta } from '$lib/api/types';
 	import { Button } from '$lib/components/ui/button/index';
 	import { Input } from '$lib/components/ui/input/index';
@@ -24,6 +25,7 @@
 		backend.status === 'ready' ? `Backend ready :${backend.port}` : 'Backend starting…'
 	);
 	const diag = $derived(backend.debug());
+	const debugEntries = $derived(apiDebug.entries);
 
 	async function refresh() {
 		loadError = '';
@@ -278,6 +280,56 @@
 					down.
 				</p>
 			{/if}
+
+			<div class="mt-3 border-t pt-3">
+				<div class="flex items-center justify-between">
+					<span class="font-medium">Network messages ({debugEntries.length})</span>
+					<Button
+						size="sm"
+						variant="outline"
+						onclick={apiDebug.clear}
+						disabled={debugEntries.length === 0}
+					>
+						Clear
+					</Button>
+				</div>
+				{#if debugEntries.length === 0}
+					<p class="text-muted-foreground mt-2">
+						Press Retry, run a script, or search logs to capture traffic.
+					</p>
+				{:else}
+					<div
+						class="bg-muted mt-2 max-h-56 space-y-2 overflow-auto rounded p-2 font-mono text-[10px]"
+					>
+						{#each debugEntries as entry (entry.id)}
+							<div class="border-border/40 border-b pb-2 last:border-0">
+								<div class="flex gap-2">
+									<span
+										class="font-bold"
+										class:text-green-600={entry.direction === 'out'}
+										class:text-blue-600={entry.direction === 'in'}
+										class:text-red-600={entry.direction === 'error'}
+									>
+										{entry.direction === 'out'
+											? '→ OUT'
+											: entry.direction === 'in'
+												? '← IN'
+												: '× ERROR'}
+									</span>
+									<span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+									<span>{entry.method} {entry.status ? `(${entry.status})` : ''}</span>
+								</div>
+								<div class="text-muted-foreground break-all">{entry.url}</div>
+								{#if entry.payload}
+									<div class="mt-1 max-h-20 overflow-auto break-all whitespace-pre-wrap">
+										{entry.payload}
+									</div>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
 		</details>
 	</Content>
 </Card>

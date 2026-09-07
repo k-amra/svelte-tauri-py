@@ -29,6 +29,11 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
+        'httpx',
+        'app.services',
+        'app.routers.harambelogs',
+        'app.services.harambelogs_client',
+        'app.services.harambelogs_models',
         'uvicorn.logging',
         'uvicorn.loops',
         'uvicorn.loops.auto',

@@ -37,6 +37,18 @@ def test_scripts_requires_token():
     assert r.status_code == 401
 
 
+def test_harambelogs_search_validates_query():
+    c = make_client()
+    r = c.get("/api/harambelogs/search/xqc/xqc", headers=auth_headers())
+    assert r.status_code == 422
+
+    r = c.get(
+        "/api/harambelogs/search/xqc/xqc?q=hello&limit=101",
+        headers=auth_headers(),
+    )
+    assert r.status_code == 422
+
+
 def test_list_and_run_example():
     c = make_client()
     r = c.get("/api/scripts", headers=auth_headers())

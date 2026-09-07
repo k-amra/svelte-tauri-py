@@ -65,9 +65,11 @@ def create_app(token: str) -> FastAPI:
 
     from app.routers import jobs as jobs_router
     from app.routers import scripts as scripts_router
+    from app.routers import harambelogs as harambelogs_router
 
     app.include_router(scripts_router.router, prefix="/api", dependencies=[Depends(verify)])
     app.include_router(jobs_router.router, prefix="/api", dependencies=[Depends(verify)])
+    app.include_router(harambelogs_router.router, prefix="/api/harambelogs", dependencies=[Depends(verify)])
 
     return app
 
