@@ -23,29 +23,29 @@ Some useful links:
    ```
 3. Install dependencies:
    ```
-   npm i
+   bun install
    ```
 
-This template uses npm as its package manager. Keep `package-lock.json` committed and use `npm ci` for reproducible installs in automation.
+This template uses bun as its package manager. Keep `bun.lock` committed and use `bun install --frozen-lockfile` for reproducible installs in automation.
 
 ## Useful commands
 
 ### Start dev server
 
 ```
-npm run tauri dev
+bun run tauri dev
 ```
 
 ### Build executable
 
 ```
-npm run tauri build
+bun run tauri build
 ```
 
 ### Add shadcn-svelte component
 
 ```
-npx shadcn-svelte@next add <component>
+bunx shadcn-svelte@next add <component>
 ```
 
 Replace `<component>` with the name of the component you want to add (e.g., button, card, dialog). You can find the full list of available components at https://next.shadcn-svelte.com/docs/components.

@@ -58,10 +58,15 @@ jobs:
 
           const expected = process.env.RELEASE_VERSION;
           const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          const packageLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
           const tauriConfig = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
           const cargoToml = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
           const cargoLock = fs.readFileSync('src-tauri/Cargo.lock', 'utf8');
+          const pyproject = fs.readFileSync('src-python/pyproject.toml', 'utf8');
+
+          if (!fs.existsSync('bun.lock')) {
+            console.error('::error file=bun.lock::bun.lock is missing.');
+            process.exit(1);
+          }
 
           const cargoManifestVersion = cargoToml.match(
             /^\[package\][\s\S]*?^version = "([^"]+)"/m
@@ -69,14 +74,14 @@ jobs:
           const cargoLockVersion = cargoLock.match(
             /\[\[package\]\]\r?\nname = "app"\r?\nversion = "([^"]+)"/
           )?.[1];
+          const pyprojectVersion = pyproject.match(/^version = "([^"]+)"/m)?.[1];
 
           const versions = {
             'package.json': packageJson.version,
-            'package-lock.json': packageLock.version,
-            'package-lock.json root package': packageLock.packages?.['']?.version,
             'src-tauri/tauri.conf.json': tauriConfig.version,
             'src-tauri/Cargo.toml': cargoManifestVersion,
-            'src-tauri/Cargo.lock app package': cargoLockVersion
+            'src-tauri/Cargo.lock app package': cargoLockVersion,
+            'src-python/pyproject.toml': pyprojectVersion
           };
 
           const mismatches = Object.entries(versions).filter(([, version]) => version !== expected);
@@ -111,13 +116,17 @@ jobs:
         include:
           - platform: 'macos-latest'
             args: '--target aarch64-apple-darwin'
-          # Uncomment for Intel builds
-          #   - platform: 'macos-latest' # for Intel based macs.
-          #     args: '--target x86_64-apple-darwin'
+            target: 'aarch64-apple-darwin'
+          # Intel Macs: PyInstaller can't cross-compile, so this needs its own runner.
+          - platform: 'macos-13'
+            args: '--target x86_64-apple-darwin'
+            target: 'x86_64-apple-darwin'
           - platform: 'ubuntu-24.04'
             args: ''
+            target: 'x86_64-unknown-linux-gnu'
           - platform: 'windows-latest'
             args: ''
+            target: 'x86_64-pc-windows-msvc'
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -125,12 +134,17 @@ jobs:
         with:
           ref: ${{ needs.validate-release.outputs.tag }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: '24'
+          bun-version: latest
       - name: Install frontend dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
+
+      - name: Setup uv (Python)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -142,6 +156,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build sidecar (PyInstaller)
+        shell: bash
+        run: bun run build:sidecar -- --target ${{ matrix.target }}
+
+      # Sign the sidecar exe BEFORE `tauri build` (Windows/macOS).
+      # Configure SIGN_COMMAND (win) / IDENTITY (mac) secrets; unsigned builds
+      # trigger SmartScreen / Gatekeeper. See plan.md installer §3.
+      - name: Sign sidecar (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: powershell -File scripts/sign-sidecar.ps1 -Triple ${{ matrix.target }}
+      - name: Sign sidecar (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: bash scripts/sign-sidecar.sh ${{ matrix.target }}
 
       - name: Build Tauri
         uses: tauri-apps/tauri-action@v1
@@ -183,17 +213,17 @@ jobs:
           fi
 
           asset_count="$(jq '[.assets[] | select(.size > 0)] | length' <<< "$release_json")"
-          if [[ "$asset_count" -ne 7 ]]; then
-            echo "::error::Expected 7 non-empty release assets, found $asset_count."
+          if [[ "$asset_count" -lt 7 ]]; then
+            echo "::error::Expected at least 7 non-empty release assets, found $asset_count."
             jq -r '.assets[] | "\(.name) (\(.size) bytes)"' <<< "$release_json"
             exit 1
           fi
 
           for suffix in '.dmg' '.app.tar.gz' '.AppImage' '.deb' '.rpm' '.exe' '.msi'; do
             if ! jq -e --arg suffix "$suffix" \
-              '[.assets[] | select(.size > 0 and (.name | endswith($suffix)))] | length == 1' \
+              '[.assets[] | select(.size > 0 and (.name | endswith($suffix)))] | length >= 1' \
               <<< "$release_json" >/dev/null; then
-              echo "::error::Expected exactly one non-empty $suffix release asset."
+              echo "::error::Missing non-empty $suffix release asset."
               exit 1
             fi
           done

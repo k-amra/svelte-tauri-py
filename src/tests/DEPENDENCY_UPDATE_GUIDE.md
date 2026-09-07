@@ -55,15 +55,15 @@ git checkout -b chore/update-deps-$(date +%Y-%m-%d)
 
 ### Step 2: Update everything
 
-**Frontend (npm):**
+**Frontend (bun):**
 
 ```bash
 # Update all packages to their latest versions allowed by package.json ranges
-npm update
+bun update
 
 # If you want to jump to latest majors (breaking changes possible):
-npx npm-check-updates -u
-npm install
+bunx npm-check-updates -u
+bun install
 ```
 
 **Backend (Rust):**
@@ -80,7 +80,7 @@ cargo build --manifest-path src-tauri/Cargo.toml
 ### Step 3: Run the full validation pipeline
 
 ```bash
-npm run test
+bun run test
 ```
 
 This single command runs, in order:
@@ -146,10 +146,10 @@ For each group:
 
 ```bash
 # Example: updating the Svelte core group
-npm install --save-dev svelte@latest @sveltejs/vite-plugin-svelte@latest svelte-check@latest
+bun add -d svelte@latest @sveltejs/vite-plugin-svelte@latest svelte-check@latest
 
 # Run tests
-npm run test
+bun run test
 
 # If green, commit this group
 git add .
@@ -157,8 +157,8 @@ git commit -m "chore(deps): update svelte core to latest"
 
 # If red, identify which package in the group caused the issue:
 # revert and try each package individually
-git checkout -- package.json package-lock.json
-npm install
+git checkout -- package.json bun.lock
+bun install
 ```
 
 ### Step 4: Handle breakages
@@ -178,7 +178,7 @@ When you find the problematic package:
 Once all groups are updated (or pinned with documented reasons):
 
 ```bash
-npm run test
+bun run test
 git push origin HEAD
 ```
 
@@ -247,8 +247,8 @@ cargo update --manifest-path src-tauri/Cargo.toml --dry-run
 
 | Cadence                           | What to update                              | Approach                                                                   |
 | --------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------- |
-| **Weekly**                        | `npm update` + `cargo update` (semver-safe) | Phase 1 only — should always pass                                          |
-| **Monthly**                       | `npx npm-check-updates -u` (all latest)     | Phase 1, fallback to Phase 2                                               |
+| **Weekly**                        | `bun update` + `cargo update` (semver-safe) | Phase 1 only — should always pass                                          |
+| **Monthly**                       | `bunx npm-check-updates -u` (all latest)     | Phase 1, fallback to Phase 2                                               |
 | **On Tauri/Svelte major release** | Major version bump of core framework        | Phase 2 directly — expect breaking changes, read the migration guide first |
 
 ---
@@ -257,19 +257,20 @@ cargo update --manifest-path src-tauri/Cargo.toml --dry-run
 
 ```bash
 # ── Diagnose ──
-npm outdated                                                    # Frontend
+bun outdated                                                    # Frontend
 cargo outdated --manifest-path src-tauri/Cargo.toml             # Rust
 
 # ── Update (optimistic) ──
-npx npm-check-updates -u && npm install                         # Frontend (all latest)
+bunx npm-check-updates -u && bun install                         # Frontend (all latest)
 cargo update --manifest-path src-tauri/Cargo.toml               # Rust (semver-safe)
 
 # ── Validate ──
-npm run test                                                    # Full pipeline
+bun run test                                                    # Full pipeline
 
 # ── Individual checks (for debugging) ──
-npm run test:check                                              # Types + lint
-npm run test:unit                                               # Vitest (92 tests)
-npm run test:rust                                               # Cargo test (9 tests)
-npm run test:watch                                              # Vitest in watch mode
+bun run test:check                                              # Types + lint
+bun run test:unit                                               # Vitest (92 tests)
+bun run test:rust                                               # Cargo test (9 tests)
+bun run test:watch                                              # Vitest in watch mode
 ```
+

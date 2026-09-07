@@ -20,3 +20,13 @@ dist-ssr
 !.env.example
 /src-tauri/target/
 /src-tauri/gen/schemas
+# Python sidecar (PyInstaller onefile output staged for Tauri)
+# NOTE: the staged exe is a build artifact — never commit it.
+/src-tauri/binaries/*
+!/src-tauri/binaries/.gitkeep
+src-python/.venv/
+src-python/dist/
+src-python/build/
+src-python/*.egg-info/
+__pycache__/
+*.pyc

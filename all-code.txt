@@ -1,0 +1,4023 @@
+# Consolidated source snapshot
+# Generated from the workspace; dependencies, build outputs, caches, locks, binaries, and documentation are omitted.
+
+================================================================================
+FILE: .github/workflows/release.yml
+================================================================================
+name: 'publish'
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and publish (for example, v2.1.0)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  validate-release:
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-24.04'
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Resolve and validate release tag
+        id: release
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$DISPATCH_TAG"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Release tag '$tag' must use the stable SemVer format vMAJOR.MINOR.PATCH."
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - name: Validate version metadata
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          const expected = process.env.RELEASE_VERSION;
+          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const tauriConfig = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const cargoToml = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
+          const cargoLock = fs.readFileSync('src-tauri/Cargo.lock', 'utf8');
+          const pyproject = fs.readFileSync('src-python/pyproject.toml', 'utf8');
+
+          if (!fs.existsSync('bun.lock')) {
+            console.error('::error file=bun.lock::bun.lock is missing.');
+            process.exit(1);
+          }
+
+          const cargoManifestVersion = cargoToml.match(
+            /^\[package\][\s\S]*?^version = "([^"]+)"/m
+          )?.[1];
+          const cargoLockVersion = cargoLock.match(
+            /\[\[package\]\]\r?\nname = "app"\r?\nversion = "([^"]+)"/
+          )?.[1];
+          const pyprojectVersion = pyproject.match(/^version = "([^"]+)"/m)?.[1];
+
+          const versions = {
+            'package.json': packageJson.version,
+            'src-tauri/tauri.conf.json': tauriConfig.version,
+            'src-tauri/Cargo.toml': cargoManifestVersion,
+            'src-tauri/Cargo.lock app package': cargoLockVersion,
+            'src-python/pyproject.toml': pyprojectVersion
+          };
+
+          const mismatches = Object.entries(versions).filter(([, version]) => version !== expected);
+          if (mismatches.length > 0) {
+            for (const [source, version] of mismatches) {
+              console.error(`::error file=${source}::Expected version ${expected}, found ${version ?? 'missing'}.`);
+            }
+            process.exit(1);
+          }
+          NODE
+
+      - name: Reject an already-published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if release_json="$(gh release view "$RELEASE_TAG" --json isDraft 2>/dev/null)"; then
+            if [[ "$(jq -r '.isDraft' <<< "$release_json")" != "true" ]]; then
+              echo "::error::Release $RELEASE_TAG is already published and cannot be rebuilt."
+              exit 1
+            fi
+          fi
+
+  publish-tauri:
+    needs: validate-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+            target: 'aarch64-apple-darwin'
+          # Intel Macs: PyInstaller can't cross-compile, so this needs its own runner.
+          - platform: 'macos-13'
+            args: '--target x86_64-apple-darwin'
+            target: 'x86_64-apple-darwin'
+          - platform: 'ubuntu-24.04'
+            args: ''
+            target: 'x86_64-unknown-linux-gnu'
+          - platform: 'windows-latest'
+            args: ''
+            target: 'x86_64-pc-windows-msvc'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate-release.outputs.tag }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Setup uv (Python)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build sidecar (PyInstaller)
+        shell: bash
+        run: bun run build:sidecar -- --target ${{ matrix.target }}
+
+      # Sign the sidecar exe BEFORE `tauri build` (Windows/macOS).
+      # Configure SIGN_COMMAND (win) / IDENTITY (mac) secrets; unsigned builds
+      # trigger SmartScreen / Gatekeeper. See plan.md installer §3.
+      - name: Sign sidecar (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: powershell -File scripts/sign-sidecar.ps1 -Triple ${{ matrix.target }}
+      - name: Sign sidecar (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: bash scripts/sign-sidecar.sh ${{ matrix.target }}
+
+      - name: Build Tauri
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.validate-release.outputs.tag }}
+          releaseName: ${{ needs.validate-release.outputs.tag }}
+          releaseBody: 'See [CHANGELOG.md](https://github.com/alysonhower/tauri2-svelte5-shadcn/blob/${{ needs.validate-release.outputs.tag }}/CHANGELOG.md) for a complete list of changes.'
+          releaseDraft: true
+          prerelease: false
+          retryAttempts: 3
+          args: ${{ matrix.args }}
+
+  publish-release:
+    needs:
+      - validate-release
+      - publish-tauri
+    permissions:
+      contents: write
+    runs-on: 'ubuntu-24.04'
+    steps:
+      - name: Verify release assets and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+        run: |
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets)"
+
+          if [[ "$(jq -r '.isDraft' <<< "$release_json")" != "true" ]]; then
+            echo "::error::Release $RELEASE_TAG must still be a draft before publication."
+            exit 1
+          fi
+
+          if [[ "$(jq -r '.isPrerelease' <<< "$release_json")" != "false" ]]; then
+            echo "::error::Release $RELEASE_TAG must not be marked as a prerelease."
+            exit 1
+          fi
+
+          asset_count="$(jq '[.assets[] | select(.size > 0)] | length' <<< "$release_json")"
+          if [[ "$asset_count" -lt 7 ]]; then
+            echo "::error::Expected at least 7 non-empty release assets, found $asset_count."
+            jq -r '.assets[] | "\(.name) (\(.size) bytes)"' <<< "$release_json"
+            exit 1
+          fi
+
+          for suffix in '.dmg' '.app.tar.gz' '.AppImage' '.deb' '.rpm' '.exe' '.msi'; do
+            if ! jq -e --arg suffix "$suffix" \
+              '[.assets[] | select(.size > 0 and (.name | endswith($suffix)))] | length >= 1' \
+              <<< "$release_json" >/dev/null; then
+              echo "::error::Missing non-empty $suffix release asset."
+              exit 1
+            fi
+          done
+
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest --verify-tag
+
+================================================================================
+FILE: .github/workflows/test-build.yml
+================================================================================
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'src-python/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'src/tests/**'
+      - 'bun.lock'
+      - 'src-tauri/Cargo.lock'
+      - 'package.json'
+      - 'vite.config.ts'
+      - 'svelte.config.js'
+      - '.github/workflows/test-build.yml'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-tauri:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+
+    runs-on: 'ubuntu-24.04'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Setup uv (Python)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Type check (svelte-check + tsc)
+        run: bun run check
+
+      - name: Lint (prettier + eslint)
+        run: bun run lint
+
+      - name: Frontend unit tests (Vitest)
+        run: bun run test:unit
+
+      - name: Python tests (pytest)
+        run: bun run test:python
+
+      - name: Rust unit tests (cargo test)
+        run: bun run test:rust
+
+      - name: Build sidecar (PyInstaller)
+        run: bun run build:sidecar
+
+      - name: Build Tauri
+        run: bun run tauri build
+
+================================================================================
+FILE: .gitignore
+================================================================================
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.env
+.env.*
+!.env.example
+/src-tauri/target/
+/src-tauri/gen/schemas
+# Python sidecar (PyInstaller onefile output staged for Tauri)
+# NOTE: the staged exe is a build artifact — never commit it.
+/src-tauri/binaries/*
+!/src-tauri/binaries/.gitkeep
+src-python/.venv/
+src-python/dist/
+src-python/build/
+src-python/*.egg-info/
+__pycache__/
+*.pyc
+
+================================================================================
+FILE: .prettierignore
+================================================================================
+pnpm-lock.yaml
+yarn.lock
+bun.lock
+bun.lockb
+/src-tauri/**/*
+
+================================================================================
+FILE: .prettierrc
+================================================================================
+{
+	"plugins": ["prettier-plugin-svelte", "prettier-plugin-tailwindcss"],
+	"overrides": [
+		{
+			"files": ["**/*.svelte"],
+			"options": {
+				"parser": "svelte"
+			}
+		}
+	],
+	"svelteStrictMode": true,
+	"useTabs": true,
+	"singleQuote": true,
+	"trailingComma": "none",
+	"printWidth": 100
+}
+
+================================================================================
+FILE: components.json
+================================================================================
+{
+	"$schema": "https://shadcn-svelte.com/schema.json",
+	"tailwind": {
+		"css": "src/app.css",
+		"baseColor": "neutral"
+	},
+	"aliases": {
+		"components": "$lib/components",
+		"utils": "$lib/utils",
+		"ui": "$lib/components/ui",
+		"hooks": "$lib/hooks",
+		"lib": "$lib"
+	},
+	"typescript": true,
+	"registry": "https://shadcn-svelte.com/registry"
+}
+
+================================================================================
+FILE: eslint.config.js
+================================================================================
+import { includeIgnoreFile } from '@eslint/compat';
+import js from '@eslint/js';
+import prettier from 'eslint-config-prettier';
+import svelte from 'eslint-plugin-svelte';
+import globals from 'globals';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript-eslint';
+import svelteConfig from './svelte.config.js';
+
+const gitignorePath = fileURLToPath(new URL('./.gitignore', import.meta.url));
+
+export default ts.config(
+	includeIgnoreFile(gitignorePath),
+	js.configs.recommended,
+	...ts.configs.recommended,
+	...svelte.configs.recommended,
+	prettier,
+	...svelte.configs.prettier,
+	{
+		languageOptions: {
+			globals: { ...globals.browser, ...globals.node }
+		},
+		rules: { 'no-undef': 'off' }
+	},
+	{
+		files: ['**/*.svelte', '**/*.svelte.ts', '**/*.svelte.js'],
+		languageOptions: {
+			parserOptions: {
+				projectService: true,
+				extraFileExtensions: ['.svelte'],
+				parser: ts.parser,
+				svelteConfig
+			}
+		}
+	}
+);
+
+================================================================================
+FILE: index.html
+================================================================================
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<link rel="icon" type="image/svg+xml" href="/vite.svg" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Vite + Svelte + TS</title>
+	</head>
+	<body>
+		<div id="app"></div>
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>
+
+================================================================================
+FILE: package.json
+================================================================================
+{
+	"name": "tauri2-svelte5-shadcn",
+	"private": true,
+	"version": "2.1.1",
+	"packageManager": "bun@1.4.2",
+	"description": "A simple desktop application template combining Tauri 2 with Svelte 5 and shadcn-svelte with a basic ci/cd implemented.",
+	"author": {
+		"name": "Alysonhower Veras Vieira",
+		"email": "contato@alysonhower.dev"
+	},
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build:frontend": "vite build",
+		"build:sidecar": "bun scripts/build-sidecar.mjs",
+		"build": "bun run build:sidecar && bun run build:frontend",
+		"tauri:dev": "cross-env SIDECAR_DEV=1 tauri dev",
+		"tauri:dev:binary": "tauri dev",
+		"tauri:build": "bun run build:sidecar && tauri build",
+		"preview": "vite preview",
+		"check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+		"format": "prettier --write .",
+		"lint": "prettier --check . && eslint .",
+		"tauri": "tauri",
+		"test:unit": "vitest run",
+		"test:watch": "vitest",
+		"test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+		"test:python": "uv run --project src-python pytest -q",
+		"test:check": "bun run check && bun run lint",
+		"test": "bun run test:check && bun run test:unit && bun run test:rust && bun run test:python",
+		"gen:types": "openapi-typescript http://127.0.0.1:8000/openapi.json -o src/lib/api/types.ts",
+		"version": "bun scripts/sync-versions.mjs"
+	},
+	"devDependencies": {
+		"@eslint/compat": "^2.0.3",
+		"@eslint/js": "^10.0.1",
+		"@lucide/svelte": "^0.577.0",
+		"@sveltejs/vite-plugin-svelte": "^7.0.0",
+		"@tauri-apps/cli": "^2.11.2",
+		"@testing-library/jest-dom": "^6.9.1",
+		"@testing-library/svelte": "^5.3.1",
+		"@tsconfig/svelte": "^5.0.8",
+		"cross-env": "^10.1.0",
+		"eslint": "^10.0.3",
+		"eslint-config-prettier": "^10.1.8",
+		"eslint-plugin-svelte": "^3.15.2",
+		"globals": "^17.4.0",
+		"jsdom": "^29.1.1",
+		"openapi-typescript": "^7.13.0",
+		"prettier": "^3.8.1",
+		"prettier-plugin-svelte": "^3.5.1",
+		"prettier-plugin-tailwindcss": "^0.7.2",
+		"svelte": "^5.53.11",
+		"svelte-check": "^4.4.5",
+		"tailwind-variants": "^3.2.2",
+		"tw-animate-css": "^1.4.0",
+		"typescript": "~5.9.3",
+		"typescript-eslint": "^8.57.0",
+		"vite": "^8.0.0",
+		"vitest": "^4.1.8"
+	},
+	"dependencies": {
+		"@tailwindcss/vite": "^4.2.1",
+		"@tauri-apps/api": "^2.11.0",
+		"@tauri-apps/plugin-shell": "^2.3.6",
+		"@types/node": "^25.5.0",
+		"clsx": "^2.1.1",
+		"tailwind-merge": "^3.5.0",
+		"tailwindcss": "^4.2.1"
+	}
+}
+
+================================================================================
+FILE: scripts/build-sidecar.mjs
+================================================================================
+#!/usr/bin/env node
+// Builds the Python sidecar with PyInstaller (onefile) and stages it for Tauri.
+//
+// Output layout (onefile: single exe, no _internal dir):
+//   src-python/dist/api-server(.exe) -> src-tauri/binaries/api-server-<triple>(.exe)
+//
+// Usage:
+//   bun scripts/build-sidecar.mjs [--target <triple>]
+// Triple defaults to `rustc --print host-tuple` (e.g. x86_64-pc-windows-msvc).
+// Wrong triple suffix = #1 setup failure: Tauri can't find the sidecar.
+
+import { execSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = join(__dirname, '..');
+
+function argValue(name) {
+	const i = process.argv.indexOf(name);
+	return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;
+}
+
+function getTriple() {
+	const override = argValue('--target');
+	if (override) return override;
+	try {
+		return execSync('rustc --print host-tuple', { encoding: 'utf8' }).trim();
+	} catch {
+		// Rust 1.83 and older lack --print host-tuple; parse `rustc -Vv`.
+		const out = execSync('rustc -Vv', { encoding: 'utf8' });
+		const m = out.match(/host:\s*(\S+)/);
+		if (!m) throw new Error('cannot determine rust target triple');
+		return m[1];
+	}
+}
+
+const triple = getTriple();
+const ext = process.platform === 'win32' ? '.exe' : '';
+console.log(`[build:sidecar] target triple: ${triple}`);
+
+execSync('uv run pyinstaller api_server.spec --noconfirm', {
+	cwd: join(root, 'src-python'),
+	stdio: 'inherit'
+});
+
+const builtExe = join(root, 'src-python', 'dist', `api-server${ext}`);
+if (!existsSync(builtExe)) {
+	throw new Error(`PyInstaller output missing: ${builtExe}`);
+}
+
+const binDir = join(root, 'src-tauri', 'binaries');
+mkdirSync(binDir, { recursive: true });
+const destExe = join(binDir, `api-server-${triple}${ext}`);
+cpSync(builtExe, destExe);
+console.log(`[build:sidecar] exe -> ${destExe}`);
+
+console.log('[build:sidecar] done. Verify: binary name ends with the Rust target triple,');
+console.log('  capability `name` matches `externalBin`, and python prints READY with flush=True.');
+
+================================================================================
+FILE: scripts/sign-sidecar.ps1
+================================================================================
+# Sign the sidecar exe BEFORE `tauri build` (Windows).
+# Requires: Azure Trusted Signing or an OV/EV code-signing cert.
+# Usage: powershell -File scripts/sign-sidecar.ps1
+# See plan.md installer §3: Tauri signs its own exe, you must sign api-server-*.exe yourself.
+param(
+  [string]$Triple = (rustc --print host-tuple).Trim()
+)
+$exe = "src-tauri/binaries/api-server-$Triple.exe"
+if (-not (Test-Path $exe)) { Write-Error "Missing $exe — run build:sidecar first"; exit 1 }
+if (-not $env:SIGN_COMMAND) {
+  Write-Warning "SIGN_COMMAND not set — skipping sidecar signing (unsigned builds trigger SmartScreen)."
+  exit 0
+}
+& $env:SIGN_COMMAND $exe
+
+================================================================================
+FILE: scripts/sign-sidecar.sh
+================================================================================
+#!/usr/bin/env bash
+# Sign the sidecar (+ every .so/.dylib inside _internal/) BEFORE `tauri build` (macOS).
+# Requires Developer ID cert + hardened runtime, otherwise notarization fails.
+# Usage: IDENTITY="Developer ID Application: ..." scripts/sign-sidecar.sh
+set -euo pipefail
+TRIPLE="${1:-$(rustc --print host-tuple)}"
+EXE="src-tauri/binaries/api-server-${TRIPLE}"
+if [[ ! -f "$EXE" ]]; then echo "Missing $EXE — run build:sidecar first" >&2; exit 1; fi
+if [[ -z "${IDENTITY:-}" ]]; then echo "IDENTITY not set — skipping sidecar signing."; exit 0; fi
+codesign --force --options runtime --sign "$IDENTITY" "$EXE"
+if [[ -d "src-tauri/resources/_internal" ]]; then
+  find "src-tauri/resources/_internal" -name "*.so" -o -name "*.dylib" | while read -r f; do
+    codesign --force --options runtime --sign "$IDENTITY" "$f"
+  done
+fi
+echo "Signed $EXE"
+
+================================================================================
+FILE: scripts/sync-versions.mjs
+================================================================================
+#!/usr/bin/env node
+// Sync version from package.json -> tauri.conf.json, Cargo.toml, pyproject.toml.
+// Usage: bun run version or: bun scripts/sync-versions.mjs [version]
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const version = process.argv[2] ?? pkg.version;
+console.log(`[version] syncing ${version}`);
+
+// tauri.conf.json
+const tauriPath = join(root, 'src-tauri', 'tauri.conf.json');
+const tauri = JSON.parse(readFileSync(tauriPath, 'utf8'));
+tauri.version = version;
+writeFileSync(tauriPath, JSON.stringify(tauri, null, 2) + '\n');
+
+function replacePackageVersion(toml, version, file) {
+	const lines = toml.split(/\r?\n/);
+	let inPackage = false;
+	let replaced = false;
+
+	for (let i = 0; i < lines.length; i += 1) {
+		const line = lines[i];
+		if (/^\s*\[package\]\s*$/.test(line)) {
+			inPackage = true;
+			continue;
+		}
+		if (/^\s*\[[^\]]+\]\s*$/.test(line)) inPackage = false;
+		if (inPackage && /^\s*version\s*=\s*"/.test(line)) {
+			lines[i] = line.replace(/(version\s*=\s*")[^"]*(".*)$/, `$1${version}$2`);
+			replaced = true;
+			break;
+		}
+	}
+
+	if (!replaced) throw new Error(`[version] package version not found in ${file}`);
+	return lines.join('\n');
+}
+
+// Cargo.toml ([package] version only; preserves comments and formatting)
+const cargoPath = join(root, 'src-tauri', 'Cargo.toml');
+let cargo = readFileSync(cargoPath, 'utf8');
+cargo = replacePackageVersion(cargo, version, cargoPath);
+writeFileSync(cargoPath, cargo);
+
+// src-python/pyproject.toml
+const pyPath = join(root, 'src-python', 'pyproject.toml');
+try {
+	let py = readFileSync(pyPath, 'utf8');
+	py = py.replace(/(^version = ")[^"]+(")/m, `$1${version}$2`);
+	writeFileSync(pyPath, py);
+} catch {
+	console.warn('[version] src-python/pyproject.toml not found, skipping');
+}
+console.log(
+	'[version] done. Also update bun.lock via `bun install` and Cargo.lock via `cargo check`.'
+);
+
+================================================================================
+FILE: src-python/api_server.spec
+================================================================================
+# PyInstaller spec (ONEFILE mode).
+#
+# Why onefile and not onedir: Tauri's `externalBin` bundles single files only,
+# and the onedir bootloader requires its `_internal/` directory as a sibling of
+# the exe. Tauri ships `resources/` in a different directory than the sidecar
+# exe (verified: `target/release/api-server.exe` dies with
+# "Failed to load Python DLL '.../_internal/python312.dll'"), so onedir can
+# never work here. Onefile = one exe, works from any directory.
+#
+# Trade-offs vs onedir (accepted deliberately):
+# - Cold start is 2-5s (extracts to %TEMP% on every launch). The UI shows
+#   backend status meanwhile, so this is visible, not broken.
+# - Tauri only knows the bootloader PID, not the real server PID. Our shutdown
+#   design already handles this: POST /shutdown is the PRIMARY mechanism
+#   (the server kills itself), kill() is only the fallback. See sidecar.rs.
+#
+# Layout after build:
+#   dist/api-server(.exe) -> copied to src-tauri/binaries/api-server-<triple>(.exe)
+#
+# NEVER enable UPX (AV false positives). Keep hidden imports here, not in code.
+
+# -*- mode: python ; coding: utf-8 -*-
+
+block_cipher = None
+
+a = Analysis(
+    ['app/main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=[
+        'uvicorn.logging',
+        'uvicorn.loops',
+        'uvicorn.loops.auto',
+        'uvicorn.protocols',
+        'uvicorn.protocols.http',
+        'uvicorn.protocols.http.auto',
+        'uvicorn.protocols.websockets',
+        'uvicorn.protocols.websockets.auto',
+        'uvicorn.lifespan',
+        'uvicorn.lifespan.on',
+        'app.main',
+        'app.core.config',
+        'app.core.jobs',
+        'app.routers.scripts',
+        'app.routers.jobs',
+        'app.scripts.registry',
+        'app.scripts.example_task',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[
+        'tkinter',
+        'Tkinter',
+        'unittest',
+        'test',
+        'pytest',
+        '_pytest',
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='api-server',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,  # NEVER enable UPX — #1 AV false-positive trigger
+    console=True,  # MUST stay True: Rust reads the READY line from stdout
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+================================================================================
+FILE: src-python/app/__init__.py
+================================================================================
+
+================================================================================
+FILE: src-python/app/core/__init__.py
+================================================================================
+
+================================================================================
+FILE: src-python/app/core/config.py
+================================================================================
+"""CLI args passed by Rust (sidecar.rs) or by a developer in standalone mode."""
+
+import argparse
+import os
+import secrets
+
+
+def parse_args(argv: list[str] | None = None):
+    p = argparse.ArgumentParser(description="api-server sidecar")
+    p.add_argument("--port", type=int, default=0, help="Port to bind (0 = OS picks a free port)")
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Development-only token override; production Rust passes SIDECAR_TOKEN",
+    )
+    p.add_argument(
+        "--data-dir",
+        default=".",
+        help="Writable directory passed by Rust (app_data_dir). Never write next to the binary.",
+    )
+    args = p.parse_args(argv)
+    args.token = args.token or os.environ.get("SIDECAR_TOKEN") or secrets.token_urlsafe(32)
+    return args
+
+================================================================================
+FILE: src-python/app/core/jobs.py
+================================================================================
+"""Background job manager for long-running scripts (>2s).
+
+Scripts report progress via a `progress(pct, msg)` callback.
+Jobs run in a daemon thread so sync script code never blocks the
+event loop — and so TestClient (sync portal) tests work as well.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+import traceback
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+
+@dataclass
+class Job:
+    id: str
+    script: str
+    status: str = "running"  # running | done | error
+    progress: float = 0.0
+    message: str = ""
+    result: Any | None = None
+    error: str | None = None
+    created_at: float = field(default_factory=time.time)
+    events: list[dict] = field(default_factory=list)
+
+    def push(self, pct: float, msg: str = "") -> None:
+        self.progress = pct
+        self.message = msg
+        self.events.append({"progress": pct, "message": msg, "t": time.time()})
+
+    def to_dict(self) -> dict:
+        return {
+            "job_id": self.id,
+            "script": self.script,
+            "status": self.status,
+            "progress": self.progress,
+            "message": self.message,
+            "result": self.result,
+            "error": self.error,
+        }
+
+
+class JobManager:
+    def __init__(self) -> None:
+        self._jobs: dict[str, Job] = {}
+        self._lock = threading.Lock()
+        self._max_history = 100
+
+    def submit(self, script: str, func: Callable, params: Any) -> Job:
+        job = Job(id=uuid.uuid4().hex[:12], script=script)
+        with self._lock:
+            self._jobs[job.id] = job
+        t = threading.Thread(target=self._run, args=(job, func, params), daemon=True)
+        t.start()
+        return job
+
+    def _run(self, job: Job, func: Callable, params: Any) -> None:
+        def progress(pct: float, msg: str = "") -> None:
+            with self._lock:
+                job.push(pct, msg)
+
+        try:
+            result = func(params, progress)
+            if hasattr(result, "model_dump"):
+                result = result.model_dump()
+            with self._lock:
+                job.result = result
+                job.status = "done"
+                job.push(100.0, job.message or "done")
+                self._evict_old_jobs()
+        except Exception as e:  # noqa: BLE001 - surfaced to the UI
+            with self._lock:
+                job.status = "error"
+                job.error = f"{e.__class__.__name__}: {e}\n{traceback.format_exc(limit=5)}"
+                self._evict_old_jobs()
+
+    def _evict_old_jobs(self) -> None:
+        """Remove the oldest completed jobs; caller must hold ``_lock``."""
+        if len(self._jobs) <= self._max_history:
+            return
+        completed = sorted(
+            ((job_id, job) for job_id, job in self._jobs.items() if job.status in ("done", "error")),
+            key=lambda item: item[1].created_at,
+        )
+        for job_id, _ in completed[: len(self._jobs) - self._max_history]:
+            del self._jobs[job_id]
+
+    def snapshot(self, job_id: str) -> dict | None:
+        """Return a consistent job response while holding the manager lock."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return job.to_dict() if job is not None else None
+
+    def events_since(self, job_id: str, seen: int) -> tuple[list[dict], str, dict] | None:
+        """Copy events and status atomically for the SSE endpoint."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            return list(job.events[seen:]), job.status, job.to_dict()
+
+
+jobs = JobManager()
+
+================================================================================
+FILE: src-python/app/main.py
+================================================================================
+"""FastAPI app factory + uvicorn entrypoint with the READY handshake.
+
+Startup contract with Rust (sidecar.rs):
+1. Rust spawns this process with SIDECAR_TOKEN=<t> --data-dir <dir> [--port 0].
+2. We bind 127.0.0.1:<port> (0 = OS picks), print `READY <port>` with flush=True.
+3. Rust polls GET /health, then calls invoke("get_backend") for {port, token}.
+4. Shutdown: Rust POSTs /shutdown (auth) then kills as fallback.
+   (PyInstaller onefile PID != child PID, so HTTP shutdown is primary.)
+"""
+
+from __future__ import annotations
+
+import argparse
+import socket
+import sys
+
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.core.config import parse_args
+
+
+def get_free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def create_app(token: str) -> FastAPI:
+    async def verify(request: Request) -> None:
+        auth = request.headers.get("authorization", "")
+        if auth != f"Bearer {token}":
+            raise HTTPException(401, "invalid token")
+
+    app = FastAPI(title="api-server")
+    app.state.token = token
+    app.state.verify_token = verify
+
+    app.add_middleware(
+        CORSMiddleware,
+        # Tauri 2 uses http://tauri.localhost for the Windows production WebView.
+        # Keep the dev origins and the legacy tauri:// origin for other platforms.
+        allow_origins=[
+            "http://tauri.localhost",
+            "tauri://localhost",
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+        ],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.post("/shutdown", dependencies=[Depends(verify)])
+    async def shutdown(request: Request):
+        server = getattr(request.app.state, "server", None)
+        if server is not None:
+            server.should_exit = True
+        return {"status": "shutting down"}
+
+    from app.routers import jobs as jobs_router
+    from app.routers import scripts as scripts_router
+
+    app.include_router(scripts_router.router, prefix="/api", dependencies=[Depends(verify)])
+    app.include_router(jobs_router.router, prefix="/api", dependencies=[Depends(verify)])
+
+    return app
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    port = args.port if args.port else get_free_port()
+
+    app = create_app(args.token)
+
+    # Rust waits for exactly this line.
+    print(f"READY {port}", flush=True)
+
+    import uvicorn
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    app.state.server = server
+    server.run()
+
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+FILE: src-python/app/routers/__init__.py
+================================================================================
+
+================================================================================
+FILE: src-python/app/routers/jobs.py
+================================================================================
+"""Jobs API for long-running scripts (>2s). Thin adapter over core/jobs.py."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+router = APIRouter()
+
+
+class JobRequest(BaseModel):
+    script: str
+    params: dict = {}
+
+
+@router.post("/jobs")
+async def create_job(req: JobRequest):
+    from app.core.jobs import jobs
+    from app.scripts import registry
+
+    mod = registry.REGISTRY.get(req.script)
+    if mod is None:
+        raise HTTPException(404, f"unknown script: {req.script}")
+    try:
+        parsed = mod.Params(**req.params)
+    except Exception as e:
+        raise HTTPException(422, str(e)) from e
+    job = jobs.submit(req.script, mod.run, parsed)
+    return jobs.snapshot(job.id)
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    from app.core.jobs import jobs
+
+    snapshot = jobs.snapshot(job_id)
+    if snapshot is None:
+        raise HTTPException(404, f"unknown job: {job_id}")
+    return snapshot
+
+
+@router.get("/jobs/{job_id}/events")
+async def job_events(job_id: str):
+    from app.core.jobs import jobs
+
+    async def gen():
+        seen = 0
+        while True:
+            batch = jobs.events_since(job_id, seen)
+            if batch is None:
+                yield f"event: error\ndata: {json.dumps({'error': 'unknown job'})}\n\n"
+                return
+            events, status, snapshot = batch
+            for ev in events:
+                yield f"data: {json.dumps(ev)}\n\n"
+                seen += 1
+            if status in ("done", "error"):
+                yield f"event: {status}\ndata: {json.dumps(snapshot)}\n\n"
+                return
+            await asyncio.sleep(0.2)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+================================================================================
+FILE: src-python/app/routers/scripts.py
+================================================================================
+"""Thin HTTP adapters over scripts/. No business logic here.
+
+Auth is attached in main.py via include_router(dependencies=[Depends(verify_token)]).
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException
+
+router = APIRouter()
+
+
+@router.get("/scripts")
+async def list_scripts():
+    from app.scripts import registry
+
+    return registry.metadata()
+
+
+@router.post("/scripts/{name}/run")
+async def run_script(name: str, params: dict):
+    from app.scripts import registry
+
+    mod = registry.REGISTRY.get(name)
+    if mod is None:
+        raise HTTPException(404, f"unknown script: {name}")
+    try:
+        parsed = mod.Params(**params)
+    except Exception as e:  # pydantic ValidationError -> 422
+        raise HTTPException(422, str(e)) from e
+    events: list = []
+
+    def progress(pct: float, msg: str = "") -> None:
+        events.append({"progress": pct, "message": msg})
+
+    result = mod.run(parsed, progress)
+    data = result.model_dump() if hasattr(result, "model_dump") else result
+    return {"name": name, "result": data, "events": events}
+
+================================================================================
+FILE: src-python/app/scripts/__init__.py
+================================================================================
+
+================================================================================
+FILE: src-python/app/scripts/example_task.py
+================================================================================
+"""Example capability. Copy this file to add a new Python capability.
+
+Contract (see plan.md §4 + AGENTS.md):
+- Pydantic `Params` and `Result` models
+- `NAME`, `DESCRIPTION` strings
+- `run(params: Params, progress=lambda pct, msg="": None) -> Result`
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Callable
+
+from pydantic import BaseModel, Field
+
+
+class Params(BaseModel):
+    input_path: str = Field(description="Input value or path to process")
+    threshold: float = 0.5
+
+
+class Result(BaseModel):
+    count: int
+    output_path: str
+
+
+NAME = "example_task"
+DESCRIPTION = "Counts things above a threshold."
+
+
+def run(params: Params, progress: Callable[[float, str], None] = lambda pct, msg="": None) -> Result:
+    progress(10.0, "starting")
+    # Simulate chunked work so progress/SSE can be observed.
+    needle = str(params.input_path)
+    haystack = f"{needle}\n" * 10
+    count = sum(1 for line in haystack.splitlines() if len(line) * params.threshold >= 1)
+    for pct in (40.0, 70.0):
+        time.sleep(0.05)
+        progress(pct, f"working ({pct:.0f}%)")
+    progress(100.0, "done")
+    return Result(count=count, output_path=f"{needle}.out")
+
+================================================================================
+FILE: src-python/app/scripts/registry.py
+================================================================================
+"""Auto-discovers scripts in app/scripts/.
+
+Adding a new capability = drop a file in scripts/ with
+Params / Result / NAME / DESCRIPTION / run(). No router changes needed.
+"""
+
+from __future__ import annotations
+
+import importlib
+import pkgutil
+import sys
+from types import ModuleType
+
+import app.scripts as scripts_pkg
+
+# PyInstaller puts imported modules in its PYZ archive, where filesystem
+# discovery is not reliable. Keep this list in sync with api_server.spec.
+FROZEN_MODULES = ("example_task",)
+
+
+def discover() -> dict[str, ModuleType]:
+    registry: dict[str, ModuleType] = {}
+    names = set(FROZEN_MODULES)
+    if not getattr(sys, "frozen", False):
+        names.update(
+            mod_info.name
+            for mod_info in pkgutil.iter_modules(scripts_pkg.__path__)
+            if not mod_info.name.startswith("_") and mod_info.name != "registry"
+        )
+    for name in sorted(names):
+        if name.startswith("_") or name == "registry":
+            continue
+        module = importlib.import_module(f"app.scripts.{name}")
+        name = getattr(module, "NAME", name)
+        if not hasattr(module, "run"):
+            continue
+        registry[name] = module
+    return registry
+
+
+REGISTRY: dict[str, ModuleType] = discover()
+
+
+def metadata() -> list[dict]:
+    items = []
+    for name, mod in sorted(REGISTRY.items()):
+        params_schema: dict = {}
+        result_schema: dict = {}
+        if hasattr(mod, "Params") and hasattr(mod.Params, "model_json_schema"):
+            params_schema = mod.Params.model_json_schema()
+        if hasattr(mod, "Result") and hasattr(mod.Result, "model_json_schema"):
+            result_schema = mod.Result.model_json_schema()
+        items.append(
+            {
+                "name": name,
+                "description": getattr(mod, "DESCRIPTION", ""),
+                "params_schema": params_schema,
+                "result_schema": result_schema,
+            }
+        )
+    return items
+
+================================================================================
+FILE: src-python/pyproject.toml
+================================================================================
+[project]
+name = "api-server"
+version = "2.1.1"
+description = "Python FastAPI sidecar for the Tauri 2 + Svelte 5 desktop app"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.0",
+]
+
+[dependency-groups]
+dev = [
+  "pyinstaller>=6.0",
+  "pytest>=8.0",
+  "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+
+[tool.pyinstaller]
+# kept for documentation; real options live in api_server.spec
+noconfirm = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+================================================================================
+FILE: src-python/tests/__init__.py
+================================================================================
+
+================================================================================
+FILE: src-python/tests/test_api.py
+================================================================================
+"""API-level tests with FastAPI TestClient (sync, no network port needed)."""
+
+import time
+
+from fastapi.testclient import TestClient
+
+from app.main import create_app
+
+TOKEN = "testtoken"
+
+
+def make_client() -> TestClient:
+    return TestClient(create_app(TOKEN))
+
+
+def auth_headers():
+    return {"Authorization": f"Bearer {TOKEN}"}
+
+
+def test_health_no_auth():
+    c = make_client()
+    r = c.get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
+def test_windows_tauri_origin_is_allowed():
+    c = make_client()
+    r = c.get("/health", headers={"Origin": "http://tauri.localhost"})
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "http://tauri.localhost"
+
+
+def test_scripts_requires_token():
+    c = make_client()
+    r = c.get("/api/scripts")
+    assert r.status_code == 401
+
+
+def test_list_and_run_example():
+    c = make_client()
+    r = c.get("/api/scripts", headers=auth_headers())
+    assert r.status_code == 200
+    names = [s["name"] for s in r.json()]
+    assert "example_task" in names
+
+    r = c.post(
+        "/api/scripts/example_task/run",
+        headers=auth_headers(),
+        json={"input_path": "hello", "threshold": 0.5},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["count"] == 10
+
+
+def test_jobs_lifecycle():
+    c = make_client()
+    r = c.post(
+        "/api/jobs",
+        headers=auth_headers(),
+        json={"script": "example_task", "params": {"input_path": "hi"}},
+    )
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    last = None
+    for _ in range(50):
+        last = c.get(f"/api/jobs/{job_id}", headers=auth_headers())
+        assert last.status_code == 200
+        if last.json()["status"] == "done":
+            break
+        time.sleep(0.05)
+    assert last is not None
+    assert last.json()["status"] == "done"
+    assert last.json()["result"]["count"] == 10
+
+================================================================================
+FILE: src-python/tests/test_example_task.py
+================================================================================
+"""Tests for example_task script."""
+
+from app.scripts import example_task
+
+
+def test_run_counts_lines():
+    params = example_task.Params(input_path="hello", threshold=0.5)
+    result = example_task.run(params)
+    assert isinstance(result, example_task.Result)
+    assert result.count == 10
+    assert result.output_path == "hello.out"
+
+
+def test_progress_callback_receives_events():
+    seen: list = []
+    params = example_task.Params(input_path="x")
+    example_task.run(params, progress=lambda pct, msg="": seen.append((pct, msg)))
+    assert seen[0][0] == 10.0
+    assert seen[-1][0] == 100.0
+
+================================================================================
+FILE: src-tauri/capabilities/default.json
+================================================================================
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "default",
+	"description": "enables the default permissions",
+	"windows": ["main"],
+	"permissions": [
+		"core:default",
+		{
+			"identifier": "shell:allow-spawn",
+			"allow": [{ "name": "binaries/api-server", "sidecar": true }]
+		}
+	]
+}
+
+================================================================================
+FILE: src-tauri/Cargo.toml
+================================================================================
+[package]
+name = "app"
+version = "2.1.1"
+description = "A simple desktop application template combining Tauri 2 with Svelte 5 and shadcn-svelte with a basic ci/cd implemented."
+authors = ["Alysonhower Veras Vieira"]
+license = "MIT"
+repository = "alysonhower/tauri2-svelte5-shadcn"
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.2", features = [] }
+tauri-plugin-log = "2.8.0"
+thiserror = "2.0.18"
+tauri-plugin-shell = "2.3.6"
+uuid = { version = "1.20.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+================================================================================
+FILE: src-tauri/src/commands.rs
+================================================================================
+pub mod default;
+pub mod errors;
+
+================================================================================
+FILE: src-tauri/src/commands/default.rs
+================================================================================
+use super::errors::Error;
+use std::fs;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
+
+#[tauri::command]
+pub fn read(app: AppHandle, path: String) -> Result<String, Error> {
+    let data = read_at(&app_data_dir(&app)?, &path)?;
+    let string = String::from_utf8(data)?;
+    Ok(string)
+}
+
+#[tauri::command]
+pub fn write(app: AppHandle, path: String, contents: String) -> Result<(), Error> {
+    write_at(&app_data_dir(&app)?, &path, contents)
+}
+
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, Error> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| Error::InvalidPath(e.to_string()))
+}
+
+fn safe_path(base: &Path, path: &str) -> Result<PathBuf, Error> {
+    match path {
+        "greet.txt" | "name.txt" => {
+            let base = fs::canonicalize(base)?;
+            let candidate = base.join(path);
+            if candidate.exists() {
+                let target = fs::canonicalize(&candidate)?;
+                if !target.starts_with(&base) {
+                    return Err(Error::InvalidPath(path.to_string()));
+                }
+            }
+            Ok(candidate)
+        }
+        _ => Err(Error::InvalidPath(path.to_string())),
+    }
+}
+
+fn read_at(base: &Path, path: &str) -> Result<Vec<u8>, Error> {
+    Ok(fs::read(safe_path(base, path)?)?)
+}
+
+fn write_at(base: &Path, path: &str, contents: String) -> Result<(), Error> {
+    fs::create_dir_all(base)?;
+    fs::write(safe_path(base, path)?, contents)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn write_then_read_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+
+        write_at(base, "greet.txt", "Hello, Tauri!".to_string()).unwrap();
+        let result = String::from_utf8(read_at(base, "greet.txt").unwrap()).unwrap();
+        assert_eq!(result, "Hello, Tauri!");
+    }
+
+    #[test]
+    fn write_overwrites_existing_content() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+
+        write_at(base, "name.txt", "first".to_string()).unwrap();
+        write_at(base, "name.txt", "second".to_string()).unwrap();
+        let result = String::from_utf8(read_at(base, "name.txt").unwrap()).unwrap();
+        assert_eq!(result, "second");
+    }
+
+    #[test]
+    fn write_empty_string() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+
+        write_at(base, "greet.txt", String::new()).unwrap();
+        let result = String::from_utf8(read_at(base, "greet.txt").unwrap()).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn write_unicode_content() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+
+        let unicode = "Olá, 世界! 🎉".to_string();
+        write_at(base, "name.txt", unicode.clone()).unwrap();
+        let result = String::from_utf8(read_at(base, "name.txt").unwrap()).unwrap();
+        assert_eq!(result, unicode);
+    }
+
+    #[test]
+    fn read_nonexistent_file_returns_io_error() {
+        let tmp = tempdir().unwrap();
+        let result = read_at(tmp.path(), "name.txt");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    #[test]
+    fn rejects_paths_outside_the_application_file_allowlist() {
+        let tmp = tempdir().unwrap();
+        let result = read_at(tmp.path(), "..\\secrets.txt");
+        assert!(matches!(result, Err(Error::InvalidPath(_))));
+    }
+
+    #[test]
+    fn read_invalid_utf8_returns_utf8_error() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+        // Write invalid UTF-8 bytes to an allowed application file.
+        fs::write(base.join("name.txt"), [0xFF, 0xFE, 0x00, 0x80]).unwrap();
+
+        let result = String::from_utf8(read_at(base, "name.txt").unwrap());
+        assert!(result.is_err());
+        assert!(matches!(result, Err(_)));
+    }
+}
+
+================================================================================
+FILE: src-tauri/src/commands/errors.rs
+================================================================================
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("invalid application file path: {0}")]
+    InvalidPath(String),
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "name", content = "message")]
+#[serde(rename_all = "camelCase")]
+enum ErrorName {
+    Io(String),
+    FromUtf8Error(String),
+    InvalidPath(String),
+}
+
+impl serde::Serialize for Error {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        let message = self.to_string();
+        let name = match self {
+            Self::Io(_) => ErrorName::Io(message),
+            Self::Utf8(_) => ErrorName::FromUtf8Error(message),
+            Self::InvalidPath(_) => ErrorName::InvalidPath(message),
+        };
+        name.serialize(serializer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_error_serializes_with_correct_shape() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err = Error::Io(io_err);
+        let json = serde_json::to_value(&err).unwrap();
+
+        assert_eq!(json["name"], "io");
+        assert!(json["message"].as_str().unwrap().contains("file not found"));
+    }
+
+    #[test]
+    fn utf8_error_serializes_with_correct_shape() {
+        let invalid = vec![0xFF, 0xFE];
+        let utf8_err = String::from_utf8(invalid).unwrap_err();
+        let err = Error::Utf8(utf8_err);
+        let json = serde_json::to_value(&err).unwrap();
+
+        assert_eq!(json["name"], "fromUtf8Error");
+        assert!(json["message"].as_str().unwrap().contains("invalid utf-8"));
+    }
+
+    #[test]
+    fn error_json_has_exactly_name_and_message_fields() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let err = Error::Io(io_err);
+        let json = serde_json::to_value(&err).unwrap();
+        let obj = json.as_object().unwrap();
+
+        assert_eq!(obj.len(), 2);
+        assert!(obj.contains_key("name"));
+        assert!(obj.contains_key("message"));
+    }
+}
+
+================================================================================
+FILE: src-tauri/src/lib.rs
+================================================================================
+mod commands;
+mod sidecar;
+use commands::default::{read, write};
+use sidecar::{BackendState, SidecarChild};
+use std::sync::Mutex;
+
+#[allow(clippy::missing_panics_doc)]
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .manage(BackendState(Mutex::new(None)))
+        .manage(SidecarChild(Mutex::new(None)))
+        .setup(|app| {
+            if cfg!(debug_assertions) {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            }
+            sidecar::spawn(app.handle())?;
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            read,
+            write,
+            sidecar::get_backend,
+            sidecar::probe_backend,
+            sidecar::shutdown_backend
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                sidecar::shutdown(app);
+            }
+        });
+}
+
+================================================================================
+FILE: src-tauri/src/main.rs
+================================================================================
+// Prevents additional console window on Windows in release, DO NOT REMOVE!!
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    app_lib::run();
+}
+
+================================================================================
+FILE: src-tauri/src/sidecar.rs
+================================================================================
+//! Python sidecar lifecycle: spawn → READY handshake → managed state → shutdown.
+//!
+//! Contract with `src-python/app/main.py`:
+//! - Rust spawns the backend with `SIDECAR_TOKEN=<t> --data-dir <dir> --port 0`.
+//! - Python binds 127.0.0.1:0, prints exactly `READY <port>` (flush=True).
+//! - Rust polls `GET /health`, stores `{port, token}`, emits `backend-ready`.
+//! - Frontend calls `invoke("get_backend")` then talks HTTP directly.
+//! - Shutdown: `POST /shutdown` (primary) + kill fallback.
+//!   (PyInstaller onefile/one-dir bootloader PID games make kill unreliable alone.)
+//!
+//! Dev mode: `SIDECAR_DEV=1` spawns `uv run python -m app.main ...` via
+//! `std::process` (hot reload, no PyInstaller cycle, no capability needed).
+
+use std::{
+    io::{BufRead, BufReader},
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::ShellExt;
+
+pub struct Backend {
+    pub port: u16,
+    pub token: String,
+}
+
+/// None until the READY line + /health succeed.
+pub struct BackendState(pub Mutex<Option<Backend>>);
+
+/// Kept so we can kill on exit as a fallback after POST /shutdown.
+pub struct SidecarChild(pub Mutex<Option<CommandChild>>);
+
+fn app_data_dir(app: &AppHandle) -> String {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("api-server"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir.to_string_lossy().to_string()
+}
+
+/// Minimal blocking GET http://127.0.0.1:port/health (no extra deps).
+fn health_ok(port: u16) -> bool {
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{port}").parse().unwrap(),
+        Duration::from_millis(500),
+    ) else {
+        return false;
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_millis(1000)))
+        .ok();
+    let req =
+        format!("GET /health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if std::io::Write::write_all(&mut stream, req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut reader = BufReader::new(&stream);
+    let mut status = String::new();
+    if reader.read_line(&mut status).is_err() {
+        return false;
+    }
+    status.contains("200")
+}
+
+fn wait_for_health(port: u16, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if health_ok(port) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Minimal blocking POST http://127.0.0.1:port/shutdown with bearer token.
+fn post_shutdown(port: u16, token: &str) {
+    let addr: std::net::SocketAddr = match format!("127.0.0.1:{port}").parse() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(800))
+    else {
+        return;
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(1500)))
+        .ok();
+    let req = format!(
+        "POST /shutdown HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let _ = std::io::Write::write_all(&mut stream, req.as_bytes());
+    // Best effort: read (and discard) the response so the server can close gracefully.
+    let mut buf = [0u8; 512];
+    use std::io::Read as _;
+    let _ = stream.read(&mut buf);
+}
+
+/// Minimal blocking GET, returns the response status line (e.g. "HTTP/1.0 200 OK").
+/// Used by `probe_backend` diagnostics: answers the question "is the server
+/// alive as seen from Rust?" independent of the WebView's fetch().
+fn http_get(port: u16, token: Option<&str>, path: &str) -> Result<String, String> {
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|e| format!("bad addr: {e}"))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
+        .map_err(|e| format!("connect failed: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(3000)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(3000)))
+        .ok();
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let req =
+        format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{auth}Connection: close\r\n\r\n");
+    std::io::Write::write_all(&mut stream, req.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
+    let mut reader = BufReader::new(&stream);
+    let mut status = String::new();
+    reader
+        .read_line(&mut status)
+        .map_err(|e| format!("read failed: {e}"))?;
+    Ok(status.trim().to_string())
+}
+
+/// Diagnostics probe for the in-app Diagnostics panel: checks the sidecar
+/// from the Rust side (raw TCP, no WebView involved). If this is green but the
+/// UI's fetch() fails, the problem is between WebView and localhost
+/// (proxy, antivirus loopback filter, firewall) — not the Python server.
+#[tauri::command]
+pub fn probe_backend(state: tauri::State<'_, BackendState>) -> serde_json::Value {
+    let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(b) = guard.as_ref() else {
+        return serde_json::json!({ "configured": false, "hint": "READY not received yet" });
+    };
+    let port = b.port;
+    let token = b.token.clone();
+    drop(guard);
+    serde_json::json!({
+        "configured": true,
+        "port": port,
+        "rust_health": http_get(port, None, "/health").unwrap_or_else(|e| format!("ERROR {e}")),
+        "rust_scripts": http_get(port, Some(&token), "/api/scripts").unwrap_or_else(|e| format!("ERROR {e}")),
+    })
+}
+
+fn on_ready(app: &AppHandle, port: u16, token: String) {
+    log::info!("sidecar READY on port {port}");
+    if !wait_for_health(port, Duration::from_secs(10)) {
+        log::error!("sidecar on port {port} never passed /health");
+        return;
+    }
+    if let Some(state) = app.try_state::<BackendState>() {
+        *state.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Backend {
+            port,
+            token: token.clone(),
+        });
+    }
+    let _ = app.emit("backend-ready", port);
+}
+
+fn parse_ready_line(line: &str) -> Option<u16> {
+    line.strip_prefix("READY ")
+        .and_then(|p| p.trim().parse().ok())
+}
+
+/// Spawn via std::process for `SIDECAR_DEV=1` (uv + hot reload).
+fn spawn_dev(app: &AppHandle, token: &str, data_dir: &str) {
+    let mut cmd = std::process::Command::new("uv");
+    cmd.args([
+        "run",
+        "--project",
+        "src-python",
+        "python",
+        "-m",
+        "app.main",
+        "--data-dir",
+        data_dir,
+        "--port",
+        "0",
+    ]);
+    cmd.env("SIDECAR_TOKEN", token);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::inherit());
+    // Run from the project root (one above src-tauri) when in `tauri dev`.
+    if let Ok(cwd) = std::env::current_dir() {
+        // cwd is usually src-tauri when spawned by the CLI; go up one.
+        let root = if cwd.file_name().is_some_and(|n| n == "src-tauri") {
+            cwd.join("..")
+        } else {
+            cwd
+        };
+        cmd.current_dir(root);
+    }
+    let handle = app.clone();
+    let token = token.to_string();
+    std::thread::spawn(move || {
+        let Ok(mut child) = cmd.spawn() else {
+            log::error!(
+                "SIDECAR_DEV: failed to spawn `uv run python -m app.main` (is uv installed?)"
+            );
+            return;
+        };
+        let stdout = child.stdout.take().expect("piped stdout");
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            let line = line.trim().to_string();
+            log::debug!("[sidecar-dev] {line}");
+            if let Some(port) = parse_ready_line(&line) {
+                on_ready(&handle, port, token.clone());
+            }
+        }
+        // Keep the child handle alive until exit.
+        let _ = child.wait();
+        log::info!("sidecar-dev process exited");
+    });
+}
+
+/// Spawn the bundled PyInstaller binary via the shell plugin.
+fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
+    let (mut rx, child) = match app.shell().sidecar("api-server").and_then(|c| {
+        c.env("SIDECAR_TOKEN", token)
+            .args(["--data-dir", data_dir, "--port", "0"])
+            .spawn()
+    }) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("failed to spawn sidecar `api-server`: {e} (did you run build:sidecar? check the target-triple suffix)");
+            return;
+        }
+    };
+    if let Some(state) = app.try_state::<SidecarChild>() {
+        *state.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+    }
+    let handle = app.clone();
+    let token = token.to_string();
+    tauri::async_runtime::spawn(async move {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(30);
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(bytes) => {
+                    let line = String::from_utf8_lossy(&bytes);
+                    for l in line.lines() {
+                        if let Some(port) = parse_ready_line(l.trim()) {
+                            let ready_handle = handle.clone();
+                            let ready_token = token.clone();
+                            std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+                                on_ready(&ready_handle, port, ready_token);
+                            }));
+                            return;
+                        }
+                    }
+                }
+                CommandEvent::Stderr(bytes) => {
+                    log::debug!("[sidecar] {}", String::from_utf8_lossy(&bytes).trim());
+                }
+                CommandEvent::Terminated(payload) => {
+                    log::warn!("sidecar terminated: {:?}", payload.code);
+                    return;
+                }
+                CommandEvent::Error(e) => {
+                    log::error!("sidecar error: {e}");
+                    return;
+                }
+                _ => {}
+            }
+            if start.elapsed() > timeout {
+                log::error!("timed out waiting for READY from sidecar");
+                return;
+            }
+        }
+    });
+}
+
+pub fn spawn(app: &AppHandle) -> tauri::Result<()> {
+    let token = uuid::Uuid::new_v4().to_string();
+    let data_dir = app_data_dir(app);
+
+    if std::env::var("SIDECAR_DEV").is_ok_and(|v| v == "1") {
+        log::info!("SIDECAR_DEV=1: spawning python via uv (hot reload)");
+        spawn_dev(app, &token, &data_dir);
+    } else {
+        spawn_bundled(app, &token, &data_dir);
+    }
+    Ok(())
+}
+
+pub fn shutdown(app: &AppHandle) {
+    // 1) Graceful: HTTP /shutdown is the PRIMARY mechanism.
+    //    (Tauri only knows the bootloader PID for PyInstaller binaries,
+    //    so kill() alone orphans the real child.)
+    let backend = app.try_state::<BackendState>().and_then(|state| {
+        state
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|b| (b.port, b.token.clone()))
+    });
+    if let Some((port, token)) = backend {
+        post_shutdown(port, &token);
+    }
+    // Give it a beat to exit cleanly, then fallback to kill.
+    std::thread::sleep(Duration::from_millis(400));
+    if let Some(child_state) = app.try_state::<SidecarChild>() {
+        if let Some(child) = child_state
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = child.kill();
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_backend(state: tauri::State<'_, BackendState>) -> Result<(u16, String), String> {
+    let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .map(|b| (b.port, b.token.clone()))
+        .ok_or_else(|| "backend not ready yet".to_string())
+}
+
+#[tauri::command]
+pub fn shutdown_backend(app: AppHandle) -> Result<(), String> {
+    shutdown(&app);
+    Ok(())
+}
+
+================================================================================
+FILE: src-tauri/tauri.conf.json
+================================================================================
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "tauri2-svelte5-shadcn",
+  "version": "2.1.1",
+  "identifier": "com.tauri2-svelte5-shadcn.dev",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build:frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "tauri2-svelte5-shadcn",
+        "width": 800,
+        "height": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:1420; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": [
+      "binaries/api-server"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
+
+================================================================================
+FILE: src/app.css
+================================================================================
+@import 'tailwindcss';
+
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+	--radius: 0.625rem;
+	--background: oklch(1 0 0);
+	--foreground: oklch(0.145 0 0);
+	--card: oklch(1 0 0);
+	--card-foreground: oklch(0.145 0 0);
+	--popover: oklch(1 0 0);
+	--popover-foreground: oklch(0.145 0 0);
+	--primary: oklch(0.205 0 0);
+	--primary-foreground: oklch(0.985 0 0);
+	--secondary: oklch(0.97 0 0);
+	--secondary-foreground: oklch(0.205 0 0);
+	--muted: oklch(0.97 0 0);
+	--muted-foreground: oklch(0.556 0 0);
+	--accent: oklch(0.97 0 0);
+	--accent-foreground: oklch(0.205 0 0);
+	--destructive: oklch(0.577 0.245 27.325);
+	--border: oklch(0.922 0 0);
+	--input: oklch(0.922 0 0);
+	--ring: oklch(0.708 0 0);
+	--sidebar: oklch(0.985 0 0);
+	--sidebar-foreground: oklch(0.145 0 0);
+	--sidebar-primary: oklch(0.205 0 0);
+	--sidebar-primary-foreground: oklch(0.985 0 0);
+	--sidebar-accent: oklch(0.97 0 0);
+	--sidebar-accent-foreground: oklch(0.205 0 0);
+	--sidebar-border: oklch(0.922 0 0);
+	--sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+	--background: oklch(0.145 0 0);
+	--foreground: oklch(0.985 0 0);
+	--card: oklch(0.205 0 0);
+	--card-foreground: oklch(0.985 0 0);
+	--popover: oklch(0.205 0 0);
+	--popover-foreground: oklch(0.985 0 0);
+	--primary: oklch(0.922 0 0);
+	--primary-foreground: oklch(0.205 0 0);
+	--secondary: oklch(0.269 0 0);
+	--secondary-foreground: oklch(0.985 0 0);
+	--muted: oklch(0.269 0 0);
+	--muted-foreground: oklch(0.708 0 0);
+	--accent: oklch(0.269 0 0);
+	--accent-foreground: oklch(0.985 0 0);
+	--destructive: oklch(0.704 0.191 22.216);
+	--border: oklch(1 0 0 / 10%);
+	--input: oklch(1 0 0 / 15%);
+	--ring: oklch(0.556 0 0);
+	--sidebar: oklch(0.205 0 0);
+	--sidebar-foreground: oklch(0.985 0 0);
+	--sidebar-primary: oklch(0.488 0.243 264.376);
+	--sidebar-primary-foreground: oklch(0.985 0 0);
+	--sidebar-accent: oklch(0.269 0 0);
+	--sidebar-accent-foreground: oklch(0.985 0 0);
+	--sidebar-border: oklch(1 0 0 / 10%);
+	--sidebar-ring: oklch(0.556 0 0);
+}
+
+@theme inline {
+	--radius-sm: calc(var(--radius) - 4px);
+	--radius-md: calc(var(--radius) - 2px);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) + 4px);
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+	--color-chart-1: var(--chart-1);
+	--color-chart-2: var(--chart-2);
+	--color-chart-3: var(--chart-3);
+	--color-chart-4: var(--chart-4);
+	--color-chart-5: var(--chart-5);
+	--color-sidebar: var(--sidebar);
+	--color-sidebar-foreground: var(--sidebar-foreground);
+	--color-sidebar-primary: var(--sidebar-primary);
+	--color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+	--color-sidebar-accent: var(--sidebar-accent);
+	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+	--color-sidebar-border: var(--sidebar-border);
+	--color-sidebar-ring: var(--sidebar-ring);
+}
+
+@layer base {
+	* {
+		@apply border-border outline-ring/50;
+	}
+	body {
+		@apply bg-background text-foreground;
+	}
+}
+
+================================================================================
+FILE: src/App.svelte
+================================================================================
+<script lang="ts">
+	import HelloWorld from '$lib/components/HelloWorld.svelte';
+	import ScriptsPanel from '$lib/components/ScriptsPanel.svelte';
+</script>
+
+<main
+	class="flex min-h-screen items-center justify-center gap-6 bg-linear-to-br from-indigo-500 via-purple-500 to-pink-500 p-4 select-none"
+>
+	<HelloWorld />
+	<ScriptsPanel />
+</main>
+
+================================================================================
+FILE: src/lib/api/backend.svelte.ts
+================================================================================
+/**
+ * Backend connection store (Svelte 5 runes).
+ * Rust owns the lifecycle; frontend talks HTTP directly to FastAPI on 127.0.0.1.
+ * See plan.md §3 + src-tauri/src/sidecar.rs.
+ */
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+
+let port = $state(0);
+let token = $state('');
+let status = $state<'starting' | 'ready' | 'error'>('starting');
+let error = $state('');
+let initPromise: Promise<void> | null = null;
+let unlistenBackendReady: (() => void) | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+let disposed = false;
+let lifecycle = 0;
+
+async function fetchBackend(): Promise<boolean> {
+	try {
+		const [p, t] = await invoke<[number, string]>('get_backend');
+		if (p > 0) {
+			port = p;
+			token = t;
+			status = 'ready';
+			error = '';
+			return true;
+		}
+	} catch (e) {
+		// Not ready yet (or running in plain `vite dev` without Tauri).
+		error = e instanceof Error ? e.message : String(e);
+	}
+	return false;
+}
+
+async function initializeBackend(runLifecycle: number): Promise<void> {
+	// Browser-only `vite dev` fallback: point at a manually started backend.
+	// e.g. `VITE_BACKEND_PORT=8000 VITE_BACKEND_TOKEN=devtoken bun run dev`
+	const envPort = Number(import.meta.env.VITE_BACKEND_PORT ?? 0);
+	const envToken = String(import.meta.env.VITE_BACKEND_TOKEN ?? '');
+	if (envPort > 0 && envToken) {
+		port = envPort;
+		token = envToken;
+		status = 'ready';
+		return;
+	}
+
+	const unlisten = await listen<number>('backend-ready', async (e) => {
+		if (disposed || lifecycle !== runLifecycle) return;
+		port = e.payload;
+		await fetchBackend();
+	});
+	if (disposed || lifecycle !== runLifecycle) {
+		unlisten();
+		return;
+	}
+	unlistenBackendReady = unlisten;
+
+	const ok = await fetchBackend();
+	if (!ok && !disposed && lifecycle === runLifecycle) {
+		retryTimer = setTimeout(() => {
+			if (!disposed && lifecycle === runLifecycle && !port) void fetchBackend();
+		}, 1500);
+	}
+}
+
+export const backend = {
+	get port() {
+		return port;
+	},
+	get token() {
+		return token;
+	},
+	get ready() {
+		return port > 0 && status === 'ready';
+	},
+	get status() {
+		return status;
+	},
+	get error() {
+		return error;
+	},
+	get base() {
+		return `http://127.0.0.1:${port}`;
+	},
+	get headers(): Record<string, string> {
+		return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+	},
+	/** Snapshot for the Diagnostics panel (token never exposed, length only). */
+	debug() {
+		return {
+			status,
+			port,
+			base: port > 0 ? `http://127.0.0.1:${port}` : '(no port yet)',
+			ready: port > 0 && status === 'ready',
+			tokenSet: token.length > 0,
+			error
+		};
+	},
+	async init() {
+		if (!initPromise) {
+			disposed = false;
+			const runLifecycle = ++lifecycle;
+			initPromise = initializeBackend(runLifecycle);
+		}
+		return initPromise;
+	},
+	async dispose() {
+		disposed = true;
+		lifecycle += 1;
+		if (retryTimer) clearTimeout(retryTimer);
+		retryTimer = null;
+		unlistenBackendReady?.();
+		unlistenBackendReady = null;
+		initPromise = null;
+	}
+};
+
+================================================================================
+FILE: src/lib/api/client.ts
+================================================================================
+/**
+ * The ONLY place that calls fetch() to the Python backend. Use it.
+ * Every route except /health requires the bearer token (see backend.headers).
+ */
+import { backend } from './backend.svelte';
+import type { JobStatus, RunScriptResponse, ScriptMeta } from './types';
+
+async function apiFetch(path: string, init: RequestInit = {}, skipAuth = false) {
+	if (!backend.ready) throw new Error('backend not ready yet');
+	const url = `${backend.base}${path}`;
+	let res: Response;
+	try {
+		const headers = skipAuth
+			? { ...(init.headers ?? {}) }
+			: { ...backend.headers, ...(init.headers ?? {}) };
+		res = await fetch(url, {
+			...init,
+			headers
+		});
+	} catch (e) {
+		// TypeError: network-level failure (connection refused, blocked loopback,
+		// proxy/AV interference, CORS preflight rejection). The URL + hint matter
+		// more than the bare "Failed to fetch".
+		const detail = e instanceof Error ? e.message : String(e);
+		console.error(`[api] fetch failed: ${url} — ${detail}`);
+		throw new Error(
+			`Cannot reach backend at ${url}: ${detail}. ` +
+				`Check Diagnostics below (Rust probe vs browser fetch) and whether a proxy/antivirus filters localhost.`,
+			{ cause: e }
+		);
+	}
+	if (!res.ok) {
+		const text = await res.text().catch(() => '');
+		console.error(`[api] ${res.status} ${path}: ${text}`);
+		throw new Error(`API ${res.status} ${path}: ${text}`);
+	}
+	return res.json();
+}
+
+export const api = {
+	health(): Promise<{ status: string }> {
+		return apiFetch('/health', {}, true);
+	},
+	listScripts(): Promise<ScriptMeta[]> {
+		return apiFetch('/api/scripts');
+	},
+	runScript(name: string, params: Record<string, unknown>): Promise<RunScriptResponse> {
+		return apiFetch(`/api/scripts/${name}/run`, {
+			method: 'POST',
+			body: JSON.stringify(params)
+		});
+	},
+	createJob(script: string, params: Record<string, unknown>): Promise<JobStatus> {
+		return apiFetch('/api/jobs', {
+			method: 'POST',
+			body: JSON.stringify({ script, params })
+		});
+	},
+	getJob(jobId: string): Promise<JobStatus> {
+		return apiFetch(`/api/jobs/${jobId}`);
+	},
+	/** Poll GET /api/jobs/{id} until done/error (simple; use SSE endpoint for live logs). */
+	async waitJob(jobId: string, onProgress?: (j: JobStatus) => void): Promise<JobStatus> {
+		for (let i = 0; i < 150; i++) {
+			const j = await api.getJob(jobId);
+			onProgress?.(j);
+			if (j.status === 'done' || j.status === 'error') return j;
+			await new Promise((r) => setTimeout(r, 200));
+		}
+		throw new Error(`job ${jobId} timed out`);
+	}
+};
+
+================================================================================
+FILE: src/lib/api/types.ts
+================================================================================
+/**
+ * Generated from FastAPI's /openapi.json via `bun run gen:types`.
+ * Do not hand-edit — regenerate instead. This checked-in copy is a minimal
+ * placeholder so `svelte-check` passes without a running backend.
+ */
+export interface paths {
+	'/health': {
+		get: {
+			responses: {
+				200: { content: { 'application/json': { status: string } } };
+			};
+		};
+	};
+}
+
+export type ScriptMeta = {
+	name: string;
+	description: string;
+	params_schema: Record<string, unknown>;
+	result_schema: Record<string, unknown>;
+};
+
+export type RunScriptResponse = {
+	name: string;
+	result: unknown;
+	events: Array<{ progress: number; message: string }>;
+};
+
+export type JobStatus = {
+	job_id: string;
+	script: string;
+	status: 'running' | 'done' | 'error';
+	progress: number;
+	message: string;
+	result: unknown;
+	error: string | null;
+};
+
+================================================================================
+FILE: src/lib/commands.svelte.ts
+================================================================================
+import { invoke } from '@tauri-apps/api/core';
+
+export const preventDefault = <T extends Event>(fn: (e: T) => void): ((e: T) => void) => {
+	return (e: T) => {
+		e.preventDefault();
+		fn(e);
+	};
+};
+
+export enum FILES {
+	GREET_FILE = 'greet.txt',
+	NAME_FILE = 'name.txt'
+}
+
+export class GlobalState {
+	private _state = $state({ name: '', greet: '' });
+
+	get greet() {
+		return this._state.greet;
+	}
+
+	set greet(value: string) {
+		this._state.greet = value;
+	}
+
+	get name() {
+		return this._state.name;
+	}
+
+	set name(value: string) {
+		this._state.name = value;
+	}
+
+	get nlen() {
+		return this.name.length;
+	}
+
+	get glen() {
+		return this.greet.length;
+	}
+
+	async read(path: FILES) {
+		const contentFromFile = await invoke<string>('read', { path });
+		if (path === FILES.NAME_FILE) {
+			this.name = contentFromFile;
+		} else if (path === FILES.GREET_FILE) {
+			this.greet = contentFromFile;
+		}
+	}
+
+	async write(path: FILES, contents: string) {
+		await invoke('write', { path, contents });
+		if (path === FILES.NAME_FILE) {
+			this.name = contents;
+		} else if (path === FILES.GREET_FILE) {
+			this.greet = contents;
+		}
+	}
+
+	reset() {
+		this.name = '';
+		this.greet = '';
+	}
+}
+
+================================================================================
+FILE: src/lib/components/HelloWorld.svelte
+================================================================================
+<script lang="ts">
+	import { FILES, GlobalState, preventDefault } from '$lib/commands.svelte';
+	import { Input } from '$lib/components/ui/input/index';
+	import { Button } from '$lib/components/ui/button/index';
+	import { Card, Header, Title, Content } from '$lib/components/ui/card/index';
+
+	const gs = new GlobalState();
+
+	// eslint-disable-next-line svelte/no-inspect
+	$inspect(gs.greet, gs.name);
+
+	const handleSubmit = preventDefault(async () => {
+		if (gs.nlen && gs.glen) {
+			await gs.write(FILES.NAME_FILE, gs.name);
+			await gs.write(FILES.GREET_FILE, gs.greet);
+		}
+	});
+
+	const handleReset = async () => {
+		gs.reset();
+		await gs.write(FILES.NAME_FILE, '');
+		await gs.write(FILES.GREET_FILE, '');
+	};
+
+	$effect(() => {
+		gs.read(FILES.NAME_FILE);
+		gs.read(FILES.GREET_FILE);
+	});
+
+	const greeting = $derived(gs.greet || 'Hello');
+	const name = $derived(gs.name || 'World');
+	const message = $derived(`${greeting}, ${name}!`);
+</script>
+
+<Card class="w-105 shadow-xl backdrop-blur-sm">
+	<Header class="pt-6">
+		<Title
+			class="bg-linear-to-r from-indigo-500 to-pink-500 bg-clip-text text-center text-3xl font-bold text-transparent"
+		>
+			{message}
+		</Title>
+	</Header>
+	<Content class="p-6">
+		<form onsubmit={handleSubmit} class="space-y-3">
+			<div>
+				<label for="greeting-input" class="text-sm font-medium">Greeting Phrase</label>
+				<Input
+					autocomplete="off"
+					autocorrect="off"
+					id="greeting-input"
+					type="text"
+					placeholder="e.g., Hello, Welcome"
+					bind:value={gs.greet}
+					class="mt-1 border border-indigo-500 focus-visible:ring-2 focus-visible:ring-purple-500"
+				/>
+			</div>
+			<div>
+				<label for="name-input" class="text-sm font-medium">Your Name</label>
+				<Input
+					autocomplete="off"
+					autocorrect="off"
+					id="name-input"
+					type="text"
+					placeholder="Enter your name"
+					bind:value={gs.name}
+					class="mt-1 border border-indigo-500 focus-visible:ring-2 focus-visible:ring-purple-500"
+				/>
+			</div>
+			<div class="flex space-x-4">
+				<Button type="submit" class="flex-1 bg-linear-to-r from-indigo-500 to-pink-500">
+					Save
+				</Button>
+				<Button type="button" variant="outline" onclick={handleReset} class="flex-1 ">Reset</Button>
+			</div>
+		</form>
+	</Content>
+</Card>
+
+================================================================================
+FILE: src/lib/components/ScriptsPanel.svelte
+================================================================================
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { invoke } from '@tauri-apps/api/core';
+	import { api } from '$lib/api/client';
+	import { backend } from '$lib/api/backend.svelte';
+	import type { ScriptMeta } from '$lib/api/types';
+	import { Button } from '$lib/components/ui/button/index';
+	import { Input } from '$lib/components/ui/input/index';
+	import { Card, Header, Title, Content } from '$lib/components/ui/card/index';
+
+	let scripts = $state<ScriptMeta[]>([]);
+	let loadError = $state('');
+	let inputPath = $state('hello');
+	let threshold = $state(0.5);
+	let running = $state(false);
+	let jobProgress = $state<number | null>(null);
+	let jobMessage = $state('');
+	let output = $state('');
+	let probe = $state('');
+	let probing = $state(false);
+	let debugMode = $state(false);
+
+	const statusText = $derived(
+		backend.status === 'ready' ? `Backend ready :${backend.port}` : 'Backend starting…'
+	);
+	const diag = $derived(backend.debug());
+
+	async function refresh() {
+		loadError = '';
+		try {
+			scripts = await api.listScripts();
+		} catch (e) {
+			loadError = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function runSync() {
+		running = true;
+		jobProgress = null;
+		output = '';
+		try {
+			const res = await api.runScript('example_task', {
+				input_path: inputPath,
+				threshold
+			});
+			output = JSON.stringify(res.result, null, 2);
+		} catch (e) {
+			output = `Error: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			running = false;
+		}
+	}
+
+	async function runJob() {
+		running = true;
+		jobProgress = 0;
+		output = '';
+		try {
+			const job = await api.createJob('example_task', {
+				input_path: inputPath,
+				threshold
+			});
+			const done = await api.waitJob(job.job_id, (j) => {
+				jobProgress = j.progress;
+				jobMessage = j.message;
+			});
+			if (done.status === 'done') output = JSON.stringify(done.result, null, 2);
+			else output = `Job error: ${done.error}`;
+		} catch (e) {
+			output = `Error: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			running = false;
+			jobProgress = null;
+		}
+	}
+
+	onMount(() => {
+		let pollTimer: ReturnType<typeof setInterval> | undefined;
+		let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+		let disposed = false;
+
+		const initialize = async () => {
+			await backend.init();
+			if (disposed) return;
+			if (backend.ready) {
+				await refresh();
+				return;
+			}
+
+			// backend-ready may arrive after init; poll once while this component is mounted.
+			pollTimer = setInterval(async () => {
+				if (!disposed && backend.ready) {
+					if (pollTimer) clearInterval(pollTimer);
+					await refresh();
+				}
+			}, 500);
+			timeoutTimer = setTimeout(() => {
+				if (pollTimer) clearInterval(pollTimer);
+			}, 15000);
+		};
+
+		void initialize();
+		return () => {
+			disposed = true;
+			if (pollTimer) clearInterval(pollTimer);
+			if (timeoutTimer) clearTimeout(timeoutTimer);
+			void backend.dispose();
+		};
+	});
+
+	// F12 is a convenient, discoverable shortcut for the in-app diagnostics.
+	// Keep this in the component so it is removed when the panel is unmounted.
+	onMount(() => {
+		function handleDebugShortcut(event: KeyboardEvent) {
+			if (event.key !== 'F12') return;
+
+			event.preventDefault();
+			debugMode = !debugMode;
+		}
+
+		window.addEventListener('keydown', handleDebugShortcut);
+		return () => window.removeEventListener('keydown', handleDebugShortcut);
+	});
+
+	/** Rust-side probe (raw TCP, no WebView): is the Python server alive? */
+	async function runProbe() {
+		probing = true;
+		probe = '';
+		try {
+			probe = JSON.stringify(await invoke('probe_backend'), null, 2);
+		} catch (e) {
+			probe = `probe invoke failed: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			probing = false;
+		}
+	}
+
+	/** Browser-side ping (no auth): can the WebView itself reach the server? */
+	async function pingHealth() {
+		probing = true;
+		probe = '';
+		try {
+			const res = await fetch(`${backend.base}/health`);
+			probe = `browser fetch /health → ${res.status}: ${await res.text()}`;
+		} catch (e) {
+			probe = `browser fetch /health failed: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			probing = false;
+		}
+	}
+
+	/** no-cors fetch: opaque response = TCP/HTTP fine, real call blocked by CORS. */
+	async function probeCors() {
+		probing = true;
+		probe = '';
+		try {
+			const res = await fetch(`${backend.base}/health`, { mode: 'no-cors' });
+			probe =
+				`no-cors fetch /health → type: ${res.type}, status: ${res.status}. ` +
+				(res.type === 'opaque'
+					? 'Network path is FINE — the normal call is blocked by CORS policy (server allow_origins).'
+					: 'Unexpected response type.');
+		} catch (e) {
+			probe = `no-cors fetch /health failed: ${e instanceof Error ? e.message : String(e)}. Network-level block (proxy/antivirus/firewall) — not CORS.`;
+		} finally {
+			probing = false;
+		}
+	}
+</script>
+
+<Card class="w-105 shadow-xl backdrop-blur-sm">
+	<Header class="pt-6">
+		<Title class="text-center text-2xl font-bold">Python Sidecar</Title>
+		<p class="text-muted-foreground text-center text-sm">{statusText}</p>
+	</Header>
+	<Content class="space-y-3 p-6">
+		{#if loadError}
+			<p class="text-sm text-red-500">{loadError}</p>
+			<Button variant="outline" onclick={refresh} class="w-full">Retry</Button>
+		{:else if scripts.length === 0}
+			<p class="text-muted-foreground text-sm">Loading scripts…</p>
+		{:else}
+			<ul class="text-sm">
+				{#each scripts as s (s.name)}
+					<li><strong>{s.name}</strong> — {s.description}</li>
+				{/each}
+			</ul>
+		{/if}
+
+		<div>
+			<label for="script-input" class="text-sm font-medium">Input path</label>
+			<Input id="script-input" bind:value={inputPath} class="mt-1" autocomplete="off" />
+		</div>
+		<div>
+			<label for="script-threshold" class="text-sm font-medium">Threshold ({threshold})</label>
+			<Input
+				id="script-threshold"
+				type="number"
+				step="0.1"
+				min="0"
+				max="10"
+				bind:value={threshold}
+				class="mt-1"
+			/>
+		</div>
+
+		{#if jobProgress !== null}
+			<p class="text-sm">Job progress: {Math.round(jobProgress)}% {jobMessage}</p>
+		{/if}
+
+		<div class="flex space-x-4">
+			<Button onclick={runSync} disabled={running || !backend.ready} class="flex-1">
+				{running ? 'Running…' : 'Run sync'}
+			</Button>
+			<Button
+				variant="outline"
+				onclick={runJob}
+				disabled={running || !backend.ready}
+				class="flex-1"
+			>
+				Run as job
+			</Button>
+		</div>
+
+		{#if output}
+			<pre
+				class="bg-muted max-h-40 overflow-auto rounded p-3 text-xs"
+				data-testid="script-output">{output}</pre>
+		{/if}
+
+		<details class="rounded border p-3 text-xs" bind:open={debugMode}>
+			<summary class="cursor-pointer font-medium">
+				Diagnostics {debugMode ? '(Debug mode · F12 to hide)' : '(F12 to open)'}
+			</summary>
+			<dl class="mt-2 space-y-1">
+				<div class="flex gap-2">
+					<dt class="font-medium">Status:</dt>
+					<dd>{diag.status}</dd>
+				</div>
+				<div class="flex gap-2">
+					<dt class="font-medium">URL:</dt>
+					<dd>{diag.base}</dd>
+				</div>
+				<div class="flex gap-2">
+					<dt class="font-medium">Token:</dt>
+					<dd>{diag.tokenSet ? 'set' : 'missing'}</dd>
+				</div>
+				{#if diag.error}
+					<div class="flex gap-2">
+						<dt class="font-medium">Init note:</dt>
+						<dd>{diag.error}</dd>
+					</div>
+				{/if}
+			</dl>
+			{#if !diag.ready}
+				<p class="text-muted-foreground mt-2">
+					Backend never became ready: the sidecar likely died on startup. Run the bundled
+					<code>$env:SIDECAR_TOKEN='test'; api-server.exe</code> in a terminal — if it prints no READY
+					line, read its error (missing DLL, antivirus quarantine).
+				</p>
+			{/if}
+			<div class="mt-2 flex flex-wrap gap-2">
+				<Button size="sm" variant="outline" onclick={runProbe} disabled={probing}>
+					{probing ? 'Probing…' : 'Probe via Rust'}
+				</Button>
+				<Button size="sm" variant="outline" onclick={pingHealth} disabled={probing || !diag.ready}>
+					Ping /health via browser
+				</Button>
+				<Button size="sm" variant="outline" onclick={probeCors} disabled={probing || !diag.ready}>
+					Test CORS (no-cors)
+				</Button>
+			</div>
+			{#if probe}
+				<pre class="bg-muted mt-2 max-h-40 overflow-auto rounded p-2">{probe}</pre>
+				<p class="text-muted-foreground mt-1">
+					Rust green + browser red: WebView↔localhost blocked (system proxy, antivirus loopback
+					filter). no-cors "opaque" = network fine, CORS policy at fault. Both red = Python server
+					down.
+				</p>
+			{/if}
+		</details>
+	</Content>
+</Card>
+
+================================================================================
+FILE: src/lib/components/ui/button/button.svelte
+================================================================================
+<script lang="ts" module>
+	import { cn, type WithElementRef } from '$lib/utils.js';
+	import type { HTMLAnchorAttributes, HTMLButtonAttributes } from 'svelte/elements';
+	import { type VariantProps, tv } from 'tailwind-variants';
+
+	export const buttonVariants = tv({
+		base: "focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium outline-none transition-all focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 [&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+		variants: {
+			variant: {
+				default: 'bg-primary text-primary-foreground shadow-xs hover:bg-primary/90',
+				destructive:
+					'bg-destructive shadow-xs hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60 text-white',
+				outline:
+					'bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50 border',
+				secondary: 'bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80',
+				ghost: 'hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50',
+				link: 'text-primary underline-offset-4 hover:underline'
+			},
+			size: {
+				default: 'h-9 px-4 py-2 has-[>svg]:px-3',
+				sm: 'h-8 gap-1.5 rounded-md px-3 has-[>svg]:px-2.5',
+				lg: 'h-10 rounded-md px-6 has-[>svg]:px-4',
+				icon: 'size-9'
+			}
+		},
+		defaultVariants: {
+			variant: 'default',
+			size: 'default'
+		}
+	});
+
+	export type ButtonVariant = VariantProps<typeof buttonVariants>['variant'];
+	export type ButtonSize = VariantProps<typeof buttonVariants>['size'];
+
+	export type ButtonProps = WithElementRef<HTMLButtonAttributes> &
+		WithElementRef<HTMLAnchorAttributes> & {
+			variant?: ButtonVariant;
+			size?: ButtonSize;
+		};
+</script>
+
+<script lang="ts">
+	let {
+		class: className,
+		variant = 'default',
+		size = 'default',
+		ref = $bindable(null),
+		href = undefined,
+		type = 'button',
+		disabled,
+		children,
+		...restProps
+	}: ButtonProps = $props();
+</script>
+
+{#if href}
+	<a
+		bind:this={ref}
+		data-slot="button"
+		class={cn(buttonVariants({ variant, size }), className)}
+		href={disabled ? undefined : href}
+		aria-disabled={disabled}
+		role={disabled ? 'link' : undefined}
+		tabindex={disabled ? -1 : undefined}
+		{...restProps}
+	>
+		{@render children?.()}
+	</a>
+{:else}
+	<button
+		bind:this={ref}
+		data-slot="button"
+		class={cn(buttonVariants({ variant, size }), className)}
+		{type}
+		{disabled}
+		{...restProps}
+	>
+		{@render children?.()}
+	</button>
+{/if}
+
+================================================================================
+FILE: src/lib/components/ui/button/index.ts
+================================================================================
+import Root, {
+	type ButtonProps,
+	type ButtonSize,
+	type ButtonVariant,
+	buttonVariants
+} from './button.svelte';
+
+export {
+	//
+	Root as Button,
+	buttonVariants,
+	Root,
+	type ButtonProps,
+	type ButtonSize,
+	type ButtonVariant,
+	type ButtonProps as Props
+};
+
+================================================================================
+FILE: src/lib/components/ui/card/card-action.svelte
+================================================================================
+<script lang="ts">
+	import { cn, type WithElementRef } from '$lib/utils.js';
+	import type { HTMLAttributes } from 'svelte/elements';
+
+	let {
+		ref = $bindable(null),
+		class: className,
+		children,
+		...restProps
+	}: WithElementRef<HTMLAttributes<HTMLDivElement>> = $props();
+</script>
+
+<div
+	bind:this={ref}
+	data-slot="card-action"
+	class={cn('col-start-2 row-span-2 row-start-1 self-start justify-self-end', className)}
+	{...restProps}
+>
+	{@render children?.()}
+</div>
+
+================================================================================
+FILE: src/lib/components/ui/card/card-content.svelte
+================================================================================
+<script lang="ts">
+	import type { HTMLAttributes } from 'svelte/elements';
+	import { cn, type WithElementRef } from '$lib/utils.js';
+
+	let {
+		ref = $bindable(null),
+		class: className,
+		children,
+		...restProps
+	}: WithElementRef<HTMLAttributes<HTMLDivElement>> = $props();
+</script>
+
+<div bind:this={ref} data-slot="card-content" class={cn('px-6', className)} {...restProps}>
+	{@render children?.()}
+</div>
+
+================================================================================
+FILE: src/lib/components/ui/card/card-description.svelte
+================================================================================
+<script lang="ts">
+	import type { HTMLAttributes } from 'svelte/elements';
+	import { cn, type WithElementRef } from '$lib/utils.js';
+
+	let {
+		ref = $bindable(null),
+		class: className,
+		children,
+		...restProps
+	}: WithElementRef<HTMLAttributes<HTMLParagraphElement>> = $props();
+</script>
+
+<p
+	bind:this={ref}
+	data-slot="card-description"
+	class={cn('text-muted-foreground text-sm', className)}
+	{...restProps}
+>
+	{@render children?.()}
+</p>
+
+================================================================================
+FILE: src/lib/components/ui/card/card-footer.svelte
+================================================================================
+<script lang="ts">
+	import { cn, type WithElementRef } from '$lib/utils.js';
+	import type { HTMLAttributes } from 'svelte/elements';
+
+	let {
+		ref = $bindable(null),
+		class: className,
+		children,
+		...restProps
+	}: WithElementRef<HTMLAttributes<HTMLDivElement>> = $props();
+</script>
+
+<div
+	bind:this={ref}
+	data-slot="card-footer"
+	class={cn('flex items-center px-6 [.border-t]:pt-6', className)}
+	{...restProps}
+>
+	{@render children?.()}
+</div>
+
+================================================================================
+FILE: src/lib/components/ui/card/card-header.svelte
+================================================================================
+<script lang="ts">
+	import { cn, type WithElementRef } from '$lib/utils.js';
+	import type { HTMLAttributes } from 'svelte/elements';
+
+	let {
+		ref = $bindable(null),
+		class: className,
+		children,
+		...restProps
+	}: WithElementRef<HTMLAttributes<HTMLDivElement>> = $props();
+</script>
+
+<div
+	bind:this={ref}
+	data-slot="card-header"
+	class={cn(
+		'@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6 has-data-[slot=card-action]:grid-cols-[1fr_auto] [.border-b]:pb-6',
+		className
+	)}
+	{...restProps}
+>
+	{@render children?.()}
+</div>
+
+================================================================================
+FILE: src/lib/components/ui/card/card-title.svelte
+================================================================================
+<script lang="ts">
+	import type { HTMLAttributes } from 'svelte/elements';
+	import { cn, type WithElementRef } from '$lib/utils.js';
+
+	let {
+		ref = $bindable(null),
+		class: className,
+		children,
+		...restProps
+	}: WithElementRef<HTMLAttributes<HTMLDivElement>> = $props();
+</script>
+
+<div
+	bind:this={ref}
+	data-slot="card-title"
+	class={cn('leading-none font-semibold', className)}
+	{...restProps}
+>
+	{@render children?.()}
+</div>
+
+================================================================================
+FILE: src/lib/components/ui/card/card.svelte
+================================================================================
+<script lang="ts">
+	import type { HTMLAttributes } from 'svelte/elements';
+	import { cn, type WithElementRef } from '$lib/utils.js';
+
+	let {
+		ref = $bindable(null),
+		class: className,
+		children,
+		...restProps
+	}: WithElementRef<HTMLAttributes<HTMLDivElement>> = $props();
+</script>
+
+<div
+	bind:this={ref}
+	data-slot="card"
+	class={cn(
+		'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm',
+		className
+	)}
+	{...restProps}
+>
+	{@render children?.()}
+</div>
+
+================================================================================
+FILE: src/lib/components/ui/card/index.ts
+================================================================================
+import Root from './card.svelte';
+import Content from './card-content.svelte';
+import Description from './card-description.svelte';
+import Footer from './card-footer.svelte';
+import Header from './card-header.svelte';
+import Title from './card-title.svelte';
+import Action from './card-action.svelte';
+
+export {
+	Root,
+	Content,
+	Description,
+	Footer,
+	Header,
+	Title,
+	Action,
+	//
+	Root as Card,
+	Content as CardContent,
+	Description as CardDescription,
+	Footer as CardFooter,
+	Header as CardHeader,
+	Title as CardTitle,
+	Action as CardAction
+};
+
+================================================================================
+FILE: src/lib/components/ui/input/index.ts
+================================================================================
+import Root from './input.svelte';
+
+export {
+	Root,
+	//
+	Root as Input
+};
+
+================================================================================
+FILE: src/lib/components/ui/input/input.svelte
+================================================================================
+<script lang="ts">
+	import type { HTMLInputAttributes, HTMLInputTypeAttribute } from 'svelte/elements';
+	import { cn, type WithElementRef } from '$lib/utils.js';
+
+	type InputType = Exclude<HTMLInputTypeAttribute, 'file'>;
+
+	type Props = WithElementRef<
+		Omit<HTMLInputAttributes, 'type'> &
+			({ type: 'file'; files?: FileList } | { type?: InputType; files?: undefined })
+	>;
+
+	let {
+		ref = $bindable(null),
+		value = $bindable(),
+		type,
+		files = $bindable(),
+		class: className,
+		...restProps
+	}: Props = $props();
+</script>
+
+{#if type === 'file'}
+	<input
+		bind:this={ref}
+		data-slot="input"
+		class={cn(
+			'selection:bg-primary dark:bg-input/30 selection:text-primary-foreground border-input ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-2 text-sm font-medium shadow-xs transition-[color,box-shadow] outline-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm',
+			'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+			'aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive',
+			className
+		)}
+		type="file"
+		bind:files
+		bind:value
+		{...restProps}
+	/>
+{:else}
+	<input
+		bind:this={ref}
+		data-slot="input"
+		class={cn(
+			'border-input bg-background selection:bg-primary dark:bg-input/30 selection:text-primary-foreground ring-offset-background placeholder:text-muted-foreground flex h-9 w-full min-w-0 rounded-md border px-3 py-1 text-base shadow-xs transition-[color,box-shadow] outline-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm',
+			'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+			'aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive',
+			className
+		)}
+		{type}
+		bind:value
+		{...restProps}
+	/>
+{/if}
+
+================================================================================
+FILE: src/lib/utils.ts
+================================================================================
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+export function cn(...inputs: ClassValue[]) {
+	return twMerge(clsx(inputs));
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type WithoutChild<T> = T extends { child?: any } ? Omit<T, 'child'> : T;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type WithoutChildren<T> = T extends { children?: any } ? Omit<T, 'children'> : T;
+export type WithoutChildrenOrChild<T> = WithoutChildren<WithoutChild<T>>;
+export type WithElementRef<T, U extends HTMLElement = HTMLElement> = T & {
+	ref?: U | null;
+};
+
+================================================================================
+FILE: src/main.ts
+================================================================================
+import { mount } from 'svelte';
+import './app.css';
+import App from './App.svelte';
+
+const app = mount(App, {
+	target: document.getElementById('app')!
+});
+
+export default app;
+
+================================================================================
+FILE: src/tests/integration/hello-world.test.ts
+================================================================================
+import { describe, it, expect, beforeEach } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/svelte';
+import { mockInvoke } from '../setup';
+import HelloWorld from '$lib/components/HelloWorld.svelte';
+
+// ---------------------------------------------------------------------------
+// Integration test: HelloWorld component
+// Full smoke test of the main application component — validates that UI
+// elements, shadcn components, Runes reactivity, and IPC bridge all work
+// together without crashing.
+// ---------------------------------------------------------------------------
+
+describe('HelloWorld — integration smoke test', () => {
+	beforeEach(() => {
+		mockInvoke.mockReset();
+		// Simulate backend returning empty strings on initial read
+		mockInvoke.mockResolvedValue('');
+	});
+
+	it('renders without crashing', () => {
+		const { container } = render(HelloWorld);
+		expect(container).toBeTruthy();
+	});
+
+	it('displays the greeting input', () => {
+		render(HelloWorld);
+		const input = screen.getByPlaceholderText('e.g., Hello, Welcome');
+		expect(input).toBeInTheDocument();
+		expect(input).toHaveAttribute('id', 'greeting-input');
+	});
+
+	it('displays the name input', () => {
+		render(HelloWorld);
+		const input = screen.getByPlaceholderText('Enter your name');
+		expect(input).toBeInTheDocument();
+		expect(input).toHaveAttribute('id', 'name-input');
+	});
+
+	it('displays the Save button', () => {
+		render(HelloWorld);
+		const btn = screen.getByRole('button', { name: /save/i });
+		expect(btn).toBeInTheDocument();
+		expect(btn).toHaveAttribute('type', 'submit');
+	});
+
+	it('displays the Reset button', () => {
+		render(HelloWorld);
+		const btn = screen.getByRole('button', { name: /reset/i });
+		expect(btn).toBeInTheDocument();
+		expect(btn).toHaveAttribute('type', 'button');
+	});
+
+	it('shows default message "Hello, World!" when state is empty', () => {
+		render(HelloWorld);
+		expect(screen.getByText('Hello, World!')).toBeInTheDocument();
+	});
+
+	it('calls invoke("read") on mount for both files', async () => {
+		render(HelloWorld);
+
+		await waitFor(() => {
+			const readCalls = mockInvoke.mock.calls.filter((call: unknown[]) => call[0] === 'read');
+			expect(readCalls.length).toBeGreaterThanOrEqual(2);
+
+			const paths = readCalls.map((call: unknown[]) => (call[1] as { path: string }).path);
+			expect(paths).toContain('name.txt');
+			expect(paths).toContain('greet.txt');
+		});
+	});
+
+	it('contains a Card with shadow-xl class', () => {
+		const { container } = render(HelloWorld);
+		const card = container.querySelector('[data-slot="card"]');
+		expect(card).toBeTruthy();
+	});
+});
+
+================================================================================
+FILE: src/tests/setup.ts
+================================================================================
+import '@testing-library/jest-dom/vitest';
+import { vi } from 'vitest';
+
+// ---------------------------------------------------------------------------
+// Mock: @tauri-apps/api/core
+// Provides a controllable `invoke` stub so every frontend test can simulate
+// IPC responses without a running Tauri backend.
+// ---------------------------------------------------------------------------
+
+const invokeMock = vi.fn().mockResolvedValue('');
+
+vi.mock('@tauri-apps/api/core', () => ({
+	invoke: invokeMock
+}));
+
+// Expose the mock so individual tests can configure per-command responses.
+// Usage:  import { mockInvoke } from '../setup';
+//         mockInvoke.mockResolvedValueOnce('hello');
+export { invokeMock as mockInvoke };
+
+================================================================================
+FILE: src/tests/unit/runes/global-state.test.ts
+================================================================================
+import { describe, it, expect, beforeEach } from 'vitest';
+import { mockInvoke } from '../../setup';
+import { GlobalState, FILES } from '$lib/commands.svelte';
+
+// ---------------------------------------------------------------------------
+// Tests: GlobalState (Svelte 5 Runes + IPC bridge)
+// Protects against: $state() runtime API changes, invoke() contract drift,
+// argument mismatch between front and back.
+// ---------------------------------------------------------------------------
+
+describe('GlobalState — runes & IPC contract', () => {
+	beforeEach(() => {
+		mockInvoke.mockReset();
+		mockInvoke.mockResolvedValue('');
+	});
+
+	it('initialises with empty name and greet', () => {
+		const gs = new GlobalState();
+		expect(gs.name).toBe('');
+		expect(gs.greet).toBe('');
+	});
+
+	it('setters update the reactive state', () => {
+		const gs = new GlobalState();
+		gs.name = 'Alice';
+		gs.greet = 'Howdy';
+		expect(gs.name).toBe('Alice');
+		expect(gs.greet).toBe('Howdy');
+	});
+
+	it('nlen and glen derive correctly from name/greet', () => {
+		const gs = new GlobalState();
+		gs.name = 'Bob';
+		gs.greet = 'Hi';
+		expect(gs.nlen).toBe(3);
+		expect(gs.glen).toBe(2);
+	});
+
+	it('reset() clears both name and greet', () => {
+		const gs = new GlobalState();
+		gs.name = 'Alice';
+		gs.greet = 'Hello';
+		gs.reset();
+		expect(gs.name).toBe('');
+		expect(gs.greet).toBe('');
+	});
+
+	describe('read() — IPC contract', () => {
+		it('calls invoke("read") with the correct path for NAME_FILE', async () => {
+			mockInvoke.mockResolvedValueOnce('Alice');
+			const gs = new GlobalState();
+			await gs.read(FILES.NAME_FILE);
+			expect(mockInvoke).toHaveBeenCalledWith('read', { path: 'name.txt' });
+			expect(gs.name).toBe('Alice');
+		});
+
+		it('calls invoke("read") with the correct path for GREET_FILE', async () => {
+			mockInvoke.mockResolvedValueOnce('Hello');
+			const gs = new GlobalState();
+			await gs.read(FILES.GREET_FILE);
+			expect(mockInvoke).toHaveBeenCalledWith('read', { path: 'greet.txt' });
+			expect(gs.greet).toBe('Hello');
+		});
+	});
+
+	describe('write() — IPC contract', () => {
+		it('calls invoke("write") with path and contents for NAME_FILE', async () => {
+			mockInvoke.mockResolvedValueOnce(undefined);
+			const gs = new GlobalState();
+			await gs.write(FILES.NAME_FILE, 'Bob');
+			expect(mockInvoke).toHaveBeenCalledWith('write', { path: 'name.txt', contents: 'Bob' });
+			expect(gs.name).toBe('Bob');
+		});
+
+		it('calls invoke("write") with path and contents for GREET_FILE', async () => {
+			mockInvoke.mockResolvedValueOnce(undefined);
+			const gs = new GlobalState();
+			await gs.write(FILES.GREET_FILE, 'Welcome');
+			expect(mockInvoke).toHaveBeenCalledWith('write', { path: 'greet.txt', contents: 'Welcome' });
+			expect(gs.greet).toBe('Welcome');
+		});
+	});
+
+	describe('FILES enum — contract values', () => {
+		it('GREET_FILE is "greet.txt"', () => {
+			expect(FILES.GREET_FILE).toBe('greet.txt');
+		});
+
+		it('NAME_FILE is "name.txt"', () => {
+			expect(FILES.NAME_FILE).toBe('name.txt');
+		});
+	});
+});
+
+================================================================================
+FILE: src/tests/unit/runes/prevent-default.test.ts
+================================================================================
+import { describe, it, expect, vi } from 'vitest';
+import { preventDefault } from '$lib/commands.svelte';
+
+// ---------------------------------------------------------------------------
+// Tests: preventDefault helper
+// Protects against: runtime API changes in Svelte event handling
+// ---------------------------------------------------------------------------
+
+describe('preventDefault — helper', () => {
+	it('calls e.preventDefault() before invoking the wrapped function', () => {
+		const innerFn = vi.fn();
+		const wrapped = preventDefault(innerFn);
+
+		const fakeEvent = {
+			preventDefault: vi.fn()
+		} as unknown as Event;
+
+		wrapped(fakeEvent);
+
+		expect(fakeEvent.preventDefault).toHaveBeenCalledOnce();
+		expect(innerFn).toHaveBeenCalledOnce();
+		expect(innerFn).toHaveBeenCalledWith(fakeEvent);
+	});
+
+	it('calls preventDefault before the inner function', () => {
+		const callOrder: string[] = [];
+		const innerFn = vi.fn(() => callOrder.push('inner'));
+		const wrapped = preventDefault(innerFn);
+
+		const fakeEvent = {
+			preventDefault: vi.fn(() => callOrder.push('prevent'))
+		} as unknown as Event;
+
+		wrapped(fakeEvent);
+
+		expect(callOrder).toEqual(['prevent', 'inner']);
+	});
+});
+
+================================================================================
+FILE: src/tests/unit/ui/button.test.ts
+================================================================================
+import { describe, it, expect } from 'vitest';
+import { render, screen } from '@testing-library/svelte';
+import Button from '$lib/components/ui/button/button.svelte';
+import { buttonVariants } from '$lib/components/ui/button/button.svelte';
+
+// ---------------------------------------------------------------------------
+// Smoke tests: Button component (shadcn-svelte)
+// Protects against: shadcn-svelte major updates, tailwind-variants API changes,
+// Svelte 5 $props()/$bindable() breaking changes.
+// ---------------------------------------------------------------------------
+
+describe('Button — smoke / regression', () => {
+	it('renders as a <button> by default', () => {
+		render(Button, { props: { children: undefined } });
+		const btn = screen.getByRole('button');
+		expect(btn).toBeInTheDocument();
+		expect(btn.tagName).toBe('BUTTON');
+	});
+
+	it('renders as an <a> when href is provided', () => {
+		render(Button, { props: { href: 'https://example.com', children: undefined } });
+		const link = screen.getByRole('link');
+		expect(link).toBeInTheDocument();
+		expect(link).toHaveAttribute('href', 'https://example.com');
+	});
+
+	it('applies disabled correctly on anchor variant', () => {
+		render(Button, { props: { href: 'https://example.com', disabled: true, children: undefined } });
+		const link = screen.getByRole('link');
+		expect(link).toHaveAttribute('aria-disabled', 'true');
+		expect(link).not.toHaveAttribute('href');
+	});
+
+	it('has data-slot="button"', () => {
+		render(Button, { props: { children: undefined } });
+		const btn = screen.getByRole('button');
+		expect(btn).toHaveAttribute('data-slot', 'button');
+	});
+
+	describe('buttonVariants — all variant/size combos compile', () => {
+		const variants = ['default', 'destructive', 'outline', 'secondary', 'ghost', 'link'] as const;
+		const sizes = ['default', 'sm', 'lg', 'icon'] as const;
+
+		for (const variant of variants) {
+			for (const size of sizes) {
+				it(`variant="${variant}" size="${size}"`, () => {
+					const cls = buttonVariants({ variant, size });
+					expect(typeof cls).toBe('string');
+					expect(cls.length).toBeGreaterThan(0);
+				});
+			}
+		}
+	});
+});
+
+================================================================================
+FILE: src/tests/unit/ui/card.test.ts
+================================================================================
+import { describe, it, expect } from 'vitest';
+import { render } from '@testing-library/svelte';
+import Card from '$lib/components/ui/card/card.svelte';
+import Content from '$lib/components/ui/card/card-content.svelte';
+import Header from '$lib/components/ui/card/card-header.svelte';
+import Title from '$lib/components/ui/card/card-title.svelte';
+import Footer from '$lib/components/ui/card/card-footer.svelte';
+import Description from '$lib/components/ui/card/card-description.svelte';
+import Action from '$lib/components/ui/card/card-action.svelte';
+
+// Also test barrel exports
+import * as CardExports from '$lib/components/ui/card/index';
+
+// ---------------------------------------------------------------------------
+// Smoke tests: Card family (shadcn-svelte)
+// Protects against: shadcn-svelte major updates breaking sub-component APIs
+// ---------------------------------------------------------------------------
+
+describe('Card — smoke / regression', () => {
+	it('Card renders with data-slot="card"', () => {
+		const { container } = render(Card);
+		const el = container.querySelector('[data-slot="card"]');
+		expect(el).toBeTruthy();
+	});
+
+	it('CardContent renders with data-slot="card-content"', () => {
+		const { container } = render(Content);
+		const el = container.querySelector('[data-slot="card-content"]');
+		expect(el).toBeTruthy();
+	});
+
+	it('CardHeader renders with data-slot="card-header"', () => {
+		const { container } = render(Header);
+		const el = container.querySelector('[data-slot="card-header"]');
+		expect(el).toBeTruthy();
+	});
+
+	it('CardTitle renders with data-slot="card-title"', () => {
+		const { container } = render(Title);
+		const el = container.querySelector('[data-slot="card-title"]');
+		expect(el).toBeTruthy();
+	});
+
+	it('CardFooter renders with data-slot="card-footer"', () => {
+		const { container } = render(Footer);
+		const el = container.querySelector('[data-slot="card-footer"]');
+		expect(el).toBeTruthy();
+	});
+
+	it('CardDescription renders with data-slot="card-description"', () => {
+		const { container } = render(Description);
+		const el = container.querySelector('[data-slot="card-description"]');
+		expect(el).toBeTruthy();
+	});
+
+	it('CardAction renders with data-slot="card-action"', () => {
+		const { container } = render(Action);
+		const el = container.querySelector('[data-slot="card-action"]');
+		expect(el).toBeTruthy();
+	});
+
+	describe('barrel exports — index.ts re-exports all sub-components', () => {
+		const expected = [
+			'Root',
+			'Content',
+			'Description',
+			'Footer',
+			'Header',
+			'Title',
+			'Action',
+			'Card',
+			'CardContent',
+			'CardDescription',
+			'CardFooter',
+			'CardHeader',
+			'CardTitle',
+			'CardAction'
+		];
+
+		for (const name of expected) {
+			it(`exports "${name}"`, () => {
+				expect((CardExports as Record<string, unknown>)[name]).toBeDefined();
+			});
+		}
+	});
+});
+
+================================================================================
+FILE: src/tests/unit/ui/input.test.ts
+================================================================================
+import { describe, it, expect } from 'vitest';
+import { render, screen } from '@testing-library/svelte';
+import Input from '$lib/components/ui/input/input.svelte';
+
+// ---------------------------------------------------------------------------
+// Smoke tests: Input component (shadcn-svelte)
+// Protects against: breaking changes in $bindable(), $props() destructuring,
+// and conditional rendering for file vs text inputs.
+// ---------------------------------------------------------------------------
+
+describe('Input — smoke / regression', () => {
+	it('renders a text input by default', () => {
+		render(Input, { props: { placeholder: 'type here' } });
+		const input = screen.getByPlaceholderText('type here');
+		expect(input).toBeInTheDocument();
+		expect(input.tagName).toBe('INPUT');
+	});
+
+	it('has data-slot="input"', () => {
+		render(Input, { props: { placeholder: 'test' } });
+		const input = screen.getByPlaceholderText('test');
+		expect(input).toHaveAttribute('data-slot', 'input');
+	});
+
+	it('renders a file input when type="file"', () => {
+		const { container } = render(Input, { props: { type: 'file' } });
+		const input = container.querySelector('input[type="file"]');
+		expect(input).toBeTruthy();
+		expect(input).toHaveAttribute('data-slot', 'input');
+	});
+
+	it('applies custom className', () => {
+		render(Input, { props: { class: 'my-custom-class', placeholder: 'cls' } });
+		const input = screen.getByPlaceholderText('cls');
+		expect(input.className).toContain('my-custom-class');
+	});
+});
+
+================================================================================
+FILE: src/tests/unit/ui/lucide-icons.test.ts
+================================================================================
+import { describe, it, expect } from 'vitest';
+
+// ---------------------------------------------------------------------------
+// Smoke tests: Lucide Icons (@lucide/svelte)
+// Protects against: package rename/restructure (lucide-svelte → @lucide/svelte),
+// icon removal, or export format breaking changes.
+//
+// We import individual icons (not the barrel) to avoid the massive overhead
+// of resolving all ~1500 icons in the test environment.
+// Individual icon modules export the component as `default`.
+// ---------------------------------------------------------------------------
+
+describe('@lucide/svelte — smoke / regression', () => {
+	it('exports Search icon', async () => {
+		const mod = await import('@lucide/svelte/icons/search');
+		expect(mod.default).toBeDefined();
+		expect(typeof mod.default === 'function' || typeof mod.default === 'object').toBe(true);
+	});
+
+	it('exports Settings icon', async () => {
+		const mod = await import('@lucide/svelte/icons/settings');
+		expect(mod.default).toBeDefined();
+	});
+
+	it('exports ChevronDown icon', async () => {
+		const mod = await import('@lucide/svelte/icons/chevron-down');
+		expect(mod.default).toBeDefined();
+	});
+
+	it('exports X icon', async () => {
+		const mod = await import('@lucide/svelte/icons/x');
+		expect(mod.default).toBeDefined();
+	});
+
+	it('exports Menu icon', async () => {
+		const mod = await import('@lucide/svelte/icons/menu');
+		expect(mod.default).toBeDefined();
+	});
+
+	it('exports Sun icon', async () => {
+		const mod = await import('@lucide/svelte/icons/sun');
+		expect(mod.default).toBeDefined();
+	});
+
+	it('exports Moon icon', async () => {
+		const mod = await import('@lucide/svelte/icons/moon');
+		expect(mod.default).toBeDefined();
+	});
+
+	it('exports Check icon', async () => {
+		const mod = await import('@lucide/svelte/icons/check');
+		expect(mod.default).toBeDefined();
+	});
+
+	it('exports Plus icon', async () => {
+		const mod = await import('@lucide/svelte/icons/plus');
+		expect(mod.default).toBeDefined();
+	});
+
+	it('exports Trash2 icon', async () => {
+		const mod = await import('@lucide/svelte/icons/trash-2');
+		expect(mod.default).toBeDefined();
+	});
+});
+
+================================================================================
+FILE: src/tests/unit/utils.test.ts
+================================================================================
+import { describe, it, expect } from 'vitest';
+import { cn } from '$lib/utils';
+import type {
+	WithoutChild,
+	WithoutChildren,
+	WithoutChildrenOrChild,
+	WithElementRef
+} from '$lib/utils';
+
+// ---------------------------------------------------------------------------
+// Tests: Utility functions and types
+// Protects against: clsx/tailwind-merge API changes, type export removals
+// ---------------------------------------------------------------------------
+
+describe('cn() — class name utility', () => {
+	it('merges simple class names', () => {
+		expect(cn('foo', 'bar')).toBe('foo bar');
+	});
+
+	it('handles conditional classes (falsy values)', () => {
+		const isHidden = false;
+		expect(cn('base', isHidden && 'hidden', undefined, null, 'active')).toBe('base active');
+	});
+
+	it('resolves Tailwind conflicts (last wins)', () => {
+		const result = cn('px-4 py-2', 'px-8');
+		expect(result).toContain('px-8');
+		expect(result).not.toContain('px-4');
+		expect(result).toContain('py-2');
+	});
+
+	it('returns empty string for no arguments', () => {
+		expect(cn()).toBe('');
+	});
+
+	it('handles array inputs', () => {
+		expect(cn(['foo', 'bar'], 'baz')).toBe('foo bar baz');
+	});
+});
+
+// Compile-time type checks — these just need to not produce TS errors
+describe('Type exports — compile-time contract', () => {
+	it('WithoutChild removes child prop', () => {
+		type Input = { child: string; other: number };
+		type Result = WithoutChild<Input>;
+		// If this compiles, the type exists and works
+		const _check: Result = { other: 42 };
+		expect(_check.other).toBe(42);
+	});
+
+	it('WithoutChildren removes children prop', () => {
+		type Input = { children: string; other: number };
+		type Result = WithoutChildren<Input>;
+		const _check: Result = { other: 42 };
+		expect(_check.other).toBe(42);
+	});
+
+	it('WithoutChildrenOrChild removes both', () => {
+		type Input = { child: string; children: string; other: number };
+		type Result = WithoutChildrenOrChild<Input>;
+		const _check: Result = { other: 42 };
+		expect(_check.other).toBe(42);
+	});
+
+	it('WithElementRef adds ref prop', () => {
+		type Input = { value: string };
+		type Result = WithElementRef<Input, HTMLDivElement>;
+		const _check: Result = { value: 'test', ref: null };
+		expect(_check.ref).toBeNull();
+	});
+});
+
+================================================================================
+FILE: src/vite-env.d.ts
+================================================================================
+/// <reference types="svelte" />
+/// <reference types="vite/client" />
+
+================================================================================
+FILE: svelte.config.js
+================================================================================
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+
+export default {
+	preprocess: vitePreprocess()
+};
+
+================================================================================
+FILE: tsconfig.app.json
+================================================================================
+{
+	"extends": "@tsconfig/svelte/tsconfig.json",
+	"compilerOptions": {
+		"baseUrl": ".",
+		"paths": {
+			"$lib": ["./src/lib"],
+			"$lib/*": ["./src/lib/*"]
+		},
+		"target": "ESNext",
+		"useDefineForClassFields": true,
+		"module": "ESNext",
+		"resolveJsonModule": true,
+		"allowJs": true,
+		"checkJs": true,
+		"isolatedModules": true,
+		"moduleDetection": "force"
+	},
+	"include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte"]
+}
+
+================================================================================
+FILE: tsconfig.json
+================================================================================
+{
+	"files": [],
+	"references": [
+		{
+			"path": "./tsconfig.app.json"
+		},
+		{
+			"path": "./tsconfig.node.json"
+		}
+	],
+	"compilerOptions": {
+		"paths": {
+			"$lib": ["./src/lib"],
+			"$lib/*": ["./src/lib/*"]
+		}
+	}
+}
+
+================================================================================
+FILE: tsconfig.node.json
+================================================================================
+{
+	"compilerOptions": {
+		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+		"target": "ES2022",
+		"lib": ["ES2023"],
+		"module": "ESNext",
+		"skipLibCheck": true,
+
+		/* Bundler mode */
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"verbatimModuleSyntax": true,
+		"moduleDetection": "force",
+		"noEmit": true,
+
+		/* Linting */
+		"strict": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"erasableSyntaxOnly": true,
+		"noFallthroughCasesInSwitch": true,
+		"noUncheckedSideEffectImports": true
+	},
+	"include": ["vite.config.ts"]
+}
+
+================================================================================
+FILE: vite.config.ts
+================================================================================
+/// <reference types="vitest/config" />
+import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { svelteTesting } from '@testing-library/svelte/vite';
+import tailwindcss from '@tailwindcss/vite';
+import path from 'path';
+import { defineConfig } from 'vite';
+
+const host = process.env.TAURI_DEV_HOST;
+
+export default defineConfig({
+	plugins: [svelte({ compilerOptions: { runes: true } }), tailwindcss(), svelteTesting()],
+	resolve: {
+		alias: {
+			$lib: path.resolve('./src/lib')
+		},
+		conditions: ['browser']
+	},
+	server: {
+		port: 1420,
+		strictPort: true,
+		host: host || false,
+		hmr: host ? { protocol: 'ws', host, port: 1421 } : undefined,
+		watch: {
+			ignored: ['**/src-tauri/**']
+		}
+	},
+	envPrefix: ['VITE_', 'TAURI_ENV_*'],
+	build: {
+		target: process.env.TAURI_ENV_PLATFORM == 'windows' ? 'chrome105' : 'safari13',
+		minify: !process.env.TAURI_ENV_DEBUG ? 'oxc' : false,
+		sourcemap: !!process.env.TAURI_ENV_DEBUG
+	},
+	test: {
+		globals: true,
+		environment: 'jsdom',
+		setupFiles: ['./src/tests/setup.ts'],
+		include: ['src/tests/**/*.test.ts'],
+		css: false,
+		testTimeout: 30000
+	}
+});
+

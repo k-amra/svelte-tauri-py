@@ -12,8 +12,8 @@ Branch: `test/smoke-regression-harness`
 
 | Tool                             | Status | Detail                              |
 | -------------------------------- | ------ | ----------------------------------- |
-| `npm run test:unit` (Vitest)     | ✅     | 92 tests, 8 suites — ~5s            |
-| `npm run test:rust` (cargo test) | ✅     | 9 tests — 0.00s (excl. compilation) |
+| `bun run test:unit` (Vitest)     | ✅     | 92 tests, 8 suites — ~5s            |
+| `bun run test:rust` (cargo test) | ✅     | 9 tests — 0.00s (excl. compilation) |
 | `svelte-check`                   | ✅     | 0 errors, 0 warnings                |
 | `tsc -p tsconfig.node.json`      | ✅     | Clean                               |
 | `vite build`                     | ✅     | Production build OK                 |
@@ -70,13 +70,13 @@ Branch: `test/smoke-regression-harness`
 
 ```bash
 # Full pipeline (static checks + frontend + rust)
-npm run test
+bun run test
 
 # Individual commands:
-npm run test:unit      # Vitest — 92 tests, ~5s
-npm run test:watch     # Vitest watch mode (dev)
-npm run test:rust      # cargo test — 9 tests
-npm run test:check     # svelte-check + tsc + prettier + eslint
+bun run test:unit      # Vitest — 92 tests, ~5s
+bun run test:watch     # Vitest watch mode (dev)
+bun run test:rust      # cargo test — 9 tests
+bun run test:check     # svelte-check + tsc + prettier + eslint
 ```
 
 ---
@@ -112,3 +112,4 @@ To keep the suite fast (total execution under 8 seconds), the following scenario
 6. **Tauri Plugin Integration:** Tests do not validate the behavior of Tauri plugins (e.g., `tauri-plugin-log`) in a real WebView context. Plugin APIs are trusted but not exercised.
 
 7. **Build Artifact Integrity:** The suite does not validate the contents of production bundles (e.g., asset hashing, chunk splitting, bundle size budgets). It only verifies that `vite build` exits without errors.
+

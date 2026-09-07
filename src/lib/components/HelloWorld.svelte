@@ -37,7 +37,7 @@
 		<Title
 			class="bg-linear-to-r from-indigo-500 to-pink-500 bg-clip-text text-center text-3xl font-bold text-transparent"
 		>
-			<p>{message}</p>
+			{message}
 		</Title>
 	</Header>
 	<Content class="p-6">

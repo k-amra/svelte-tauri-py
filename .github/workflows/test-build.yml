@@ -7,9 +7,15 @@ on:
     paths:
       - 'src/**'
       - 'src-tauri/**'
+      - 'src-python/**'
+      - 'scripts/**'
       - 'tests/**'
-      - 'package-lock.json'
+      - 'src/tests/**'
+      - 'bun.lock'
       - 'src-tauri/Cargo.lock'
+      - 'package.json'
+      - 'vite.config.ts'
+      - 'svelte.config.js'
       - '.github/workflows/test-build.yml'
   pull_request:
   workflow_dispatch:
@@ -21,7 +27,7 @@ concurrency:
 jobs:
   build-tauri:
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: true
 
@@ -29,12 +35,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: '24'
+          bun-version: latest
       - name: Install frontend dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
+
+      - name: Setup uv (Python)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -45,16 +56,22 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Type check (svelte-check + tsc)
-        run: npm run check
+        run: bun run check
 
       - name: Lint (prettier + eslint)
-        run: npm run lint
+        run: bun run lint
 
       - name: Frontend unit tests (Vitest)
-        run: npm run test:unit
+        run: bun run test:unit
+
+      - name: Python tests (pytest)
+        run: bun run test:python
 
       - name: Rust unit tests (cargo test)
-        run: npm run test:rust
+        run: bun run test:rust
+
+      - name: Build sidecar (PyInstaller)
+        run: bun run build:sidecar
 
       - name: Build Tauri
-        run: npm run tauri build
+        run: bun run tauri build
