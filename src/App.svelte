@@ -4,6 +4,7 @@
 	import HelloWorld from '$lib/components/HelloWorld.svelte';
 	import HarambelogsPanel from '$lib/components/HarambelogsPanel.svelte';
 	import ScriptsPanel from '$lib/components/ScriptsPanel.svelte';
+	import ChatStatsPanel from '$lib/components/ChatStatsPanel.svelte';
 
 	// App owns the global backend lifecycle (init once, dispose on unmount).
 	onMount(() => {
@@ -20,4 +21,5 @@
 	<HelloWorld />
 	<ScriptsPanel />
 	<HarambelogsPanel />
+	<ChatStatsPanel />
 </main>

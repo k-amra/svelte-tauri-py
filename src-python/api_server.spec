@@ -21,19 +21,27 @@
 
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+
+# polars ships a compiled extension (polars.polars): collect everything
+# explicitly so frozen-mode discovery can't silently miss it.
+polars_datas, polars_binaries, polars_hiddenimports = collect_all('polars')
+
 block_cipher = None
 
 a = Analysis(
     ['app/main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
+    binaries=polars_binaries,
+    datas=polars_datas,
     hiddenimports=[
         'httpx',
         'app.services',
         'app.routers.harambelogs',
         'app.services.harambelogs_client',
         'app.services.harambelogs_models',
+        'app.services.log_fetch',
+        'app.scripts.chat_stats',
         'uvicorn.logging',
         'uvicorn.loops',
         'uvicorn.loops.auto',
@@ -51,6 +59,7 @@ a = Analysis(
         'app.routers.jobs',
         'app.scripts.registry',
         'app.scripts.example_task',
+        *polars_hiddenimports,
     ],
     hookspath=[],
     hooksconfig={},

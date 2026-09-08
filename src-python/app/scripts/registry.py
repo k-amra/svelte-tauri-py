@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 # PyInstaller puts imported modules in its PYZ archive, where filesystem
 # discovery is not reliable. Keep this list in sync with api_server.spec.
-FROZEN_MODULES = ("example_task",)
+FROZEN_MODULES = ("chat_stats", "example_task")
 
 
 def discover() -> dict[str, ModuleType]:
