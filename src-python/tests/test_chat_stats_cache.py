@@ -37,6 +37,11 @@ def test_second_run_hits_cache_and_force_bypasses(monkeypatch):
 
     monkeypatch.setattr(chat_stats, "_fetch_all", fake_fetch)
 
+    async def fake_emotes(channel_name, user_id):
+        return {}
+
+    monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
+
     params = chat_stats.Params(
         channel="chan", from_date=datetime(2024, 1, 1, tzinfo=UTC), to_date=datetime(2024, 1, 2, tzinfo=UTC)
     )

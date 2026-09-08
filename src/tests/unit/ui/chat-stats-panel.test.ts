@@ -31,7 +31,8 @@ const fakeStats: ChatStatsResult = {
 		Array.from({ length: 24 }, (_, h) => (d === 0 && h === 10 ? 42 : 0))
 	),
 	messages_per_day: [{ date: '2024-01-15', count: 42 }],
-	top_words: [{ word: 'hello', count: 20 }]
+	top_words: [{ word: 'hello', count: 20 }],
+	top_emotes: [{ name: 'Kappa', count: 15 }]
 };
 
 function doneJob(): JobStatus {
@@ -105,6 +106,8 @@ describe('ChatStatsPanel', () => {
 		});
 		expect(screen.getByText('alice')).toBeInTheDocument();
 		expect(screen.getByText('Weekday × hour heatmap (UTC)')).toBeInTheDocument();
+		expect(screen.getByText('Top emotes')).toBeInTheDocument();
+		expect(screen.getByText('Kappa')).toBeInTheDocument();
 	});
 
 	it('shows the cache note and sends force_refresh when bypass is ticked', async () => {

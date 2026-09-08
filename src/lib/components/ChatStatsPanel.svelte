@@ -94,6 +94,9 @@
 	const maxWord = $derived(
 		stats && stats.top_words.length > 0 ? Math.max(...stats.top_words.map((w) => w.count)) : 1
 	);
+	const maxEmote = $derived(
+		stats && stats.top_emotes.length > 0 ? Math.max(...stats.top_emotes.map((e) => e.count)) : 1
+	);
 </script>
 
 <Card class="w-120 shadow-xl backdrop-blur-sm">
@@ -278,6 +281,26 @@
 					{/each}
 				</div>
 			</div>
+
+			{#if stats.top_emotes.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Top emotes</p>
+					<div class="space-y-1">
+						{#each stats.top_emotes as e (e.name)}
+							<div class="flex items-center gap-2 text-xs">
+								<span class="w-24 truncate" title={e.name}>{e.name}</span>
+								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
+									<div
+										class="h-full bg-purple-500"
+										style="width: {(e.count / maxEmote) * 100}%"
+									></div>
+								</div>
+								<span class="w-12 text-right">{e.count.toLocaleString()}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
 		{/if}
 	</Content>
 </Card>

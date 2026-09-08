@@ -18,6 +18,11 @@ export interface WordCount {
 	count: number;
 }
 
+export interface EmoteCount {
+	name: string;
+	count: number;
+}
+
 export interface ChatStatsResult {
 	total_messages: number;
 	unique_chatters: number;
@@ -35,6 +40,7 @@ export interface ChatStatsResult {
 	activity_by_weekday_hour: number[][];
 	messages_per_day: DayCount[];
 	top_words: WordCount[];
+	top_emotes: EmoteCount[];
 }
 
 export const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];

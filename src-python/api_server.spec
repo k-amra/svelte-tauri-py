@@ -41,6 +41,7 @@ a = Analysis(
         'app.services.harambelogs_client',
         'app.services.harambelogs_models',
         'app.services.log_cache',
+        'app.services.emotes',
         'app.services.log_fetch',
         'app.scripts.chat_stats',
         'uvicorn.logging',

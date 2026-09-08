@@ -23,6 +23,7 @@ import polars as pl
 from pydantic import BaseModel, Field
 
 from app.services import log_cache
+from app.services.emotes import fetch_channel_emotes
 from app.services.harambelogs_client import HarambelogsAPI
 from app.services.harambelogs_models import FullMessage
 from app.services.log_fetch import fetch_channel_logs
@@ -80,6 +81,11 @@ class WordCount(BaseModel):
     count: int
 
 
+class EmoteCount(BaseModel):
+    name: str
+    count: int
+
+
 class Result(BaseModel):
     total_messages: int
     unique_chatters: int
@@ -93,6 +99,7 @@ class Result(BaseModel):
     activity_by_weekday_hour: list[list[int]]  # 7 x 24, Monday-first, UTC
     messages_per_day: list[DayCount]
     top_words: list[WordCount]
+    top_emotes: list[EmoteCount]
 
 
 def _parse_ts(value: datetime | str) -> datetime | None:
@@ -107,30 +114,35 @@ def _parse_ts(value: datetime | str) -> datetime | None:
 
 
 def messages_to_frame(messages: list[FullMessage]) -> pl.DataFrame:
-    """Convert fetched messages to a polars frame (username/text/ts).
+    """Convert fetched messages to a polars frame (username/text/ts/emotes_tag).
 
-    Rows with unparsable timestamps are dropped — they cannot be placed
-    in time, and every downstream stat is time-based.
+    The raw `emotes` IRC tag is preserved so emote counting keeps working
+    on frames loaded back from the parquet disk cache. Rows with unparsable
+    timestamps are dropped — they cannot be placed in time, and every
+    downstream stat is time-based.
     """
-    rows: list[tuple[str, str, datetime]] = []
+    rows: list[tuple[str, str, datetime, str | None]] = []
     for m in messages:
         ts = _parse_ts(m.timestamp)
         if ts is not None:
-            rows.append((m.username, m.text, ts))
+            emotes_tag = m.tags.get("emotes") if m.tags else None
+            rows.append((m.username, m.text, ts, str(emotes_tag) if emotes_tag else None))
     if not rows:
         return pl.DataFrame(
             {
                 "username": pl.Series([], dtype=pl.String),
                 "text": pl.Series([], dtype=pl.String),
                 "ts": pl.Series([], dtype=pl.Datetime(time_unit="us", time_zone="UTC")),
+                "emotes_tag": pl.Series([], dtype=pl.String),
             }
         )
-    usernames, texts, stamps = zip(*rows, strict=True)
+    usernames, texts, stamps, emotes = zip(*rows, strict=True)
     return pl.DataFrame(
         {
             "username": list(usernames),
             "text": list(texts),
             "ts": pl.Series(list(stamps), dtype=pl.Datetime(time_unit="us", time_zone="UTC")),
+            "emotes_tag": list(emotes),
         }
     )
 
@@ -147,6 +159,7 @@ def _empty_stats() -> dict:
         "activity_by_weekday_hour": [[0] * 24 for _ in range(7)],
         "messages_per_day": [],
         "top_words": [],
+        "top_emotes": [],
     }
 
 
@@ -239,17 +252,66 @@ def compute_stats(df: pl.DataFrame, top_n: int) -> dict:
     }
 
 
+def _count_emotes_from_frame(df: pl.DataFrame, emote_map: dict[str, str]) -> list[dict]:
+    """Count emotes from the frame's preserved IRC tags (100% accurate).
+
+    The native Twitch `emotes` tag (`id:start-end,start-end`) carries
+    character ranges into the message text, so the emote *name* is read
+    straight from the message — no id→name API needed. This matters because
+    the tag only covers Twitch-native emotes, while the 7TV/BTTV/FFZ map
+    covers third-party ones: the two id spaces barely overlap. Third-party
+    emotes (absent from the tag) are matched as whole words in the text
+    against the known catalog names, excluding names already seen via tags
+    so nothing is double-counted.
+    """
+    if "emotes_tag" not in df.columns:
+        return []
+
+    texts = df["text"].to_list() if "text" in df.columns else [None] * df.height
+    named_counts: dict[str, int] = {}
+    for tag, text in zip(df["emotes_tag"].to_list(), texts, strict=True):
+        if not tag:
+            continue
+        for part in str(tag).split("/"):
+            if ":" not in part:
+                continue
+            emote_id, _, ranges = part.partition(":")
+            for occurrence in ranges.split(","):
+                name: str | None = None
+                if isinstance(text, str):
+                    try:
+                        start, end = occurrence.split("-")
+                        name = text[int(start) : int(end) + 1] or None
+                    except (ValueError, IndexError):
+                        name = None
+                if not name:
+                    name = f"[{emote_id}]"
+                named_counts[name] = named_counts.get(name, 0) + 1
+
+    # Third-party emotes never appear in the IRC tag: match catalog names.
+    if emote_map and "text" in df.columns:
+        known_names = set(emote_map.values()) - set(named_counts)
+        if known_names:
+            for text in df["text"].to_list():
+                for word in str(text).split():
+                    if word in known_names:
+                        named_counts[word] = named_counts.get(word, 0) + 1
+
+    top_emotes = sorted(named_counts.items(), key=lambda item: item[1], reverse=True)[:TOP_WORDS]
+    return [{"name": name, "count": count} for name, count in top_emotes]
+
+
 async def _fetch_all(
     params: Params, progress: Callable[[float, str], None]
 ) -> tuple[list[FullMessage], bool]:
-    """Fetch every page; map page index onto the 2% → 80% progress budget."""
+    """Fetch every page; map page index onto the 2% → 78% progress budget."""
     total = 0
 
     def on_page(page: int, page_messages: list[FullMessage]) -> None:
         nonlocal total
         total += len(page_messages)
-        # Diminishing approach to 80%: keeps moving on very long fetches.
-        pct = 2.0 + 78.0 * (1.0 - 0.9 ** (page + 1))
+        # Diminishing approach to 78%: keeps moving on very long fetches.
+        pct = 2.0 + 76.0 * (1.0 - 0.9 ** (page + 1))
         progress(pct, f"fetched {total} messages (page {page + 1})")
 
     async with HarambelogsAPI() as api:
@@ -272,7 +334,14 @@ def run(
     if cached is not None:
         df, meta = cached
         progress(80.0, f"cache hit: {meta.get('message_count', df.height)} messages")
+
+        # Emote catalog is tiny and cached 24h separately — refresh it even
+        # on a frame cache hit, using the stored Twitch user id.
+        twitch_id = meta.get("twitch_id")
+        emote_map = asyncio.run(fetch_channel_emotes(params.channel, twitch_id))
+
         stats = compute_stats(df, params.top_n)
+        stats["top_emotes"] = _count_emotes_from_frame(df, emote_map)
         stats["truncated"] = bool(meta.get("truncated", False))
         stats["from_cache"] = True
         fetched_at = meta.get("fetched_at")
@@ -284,8 +353,19 @@ def run(
     # Scripts run in worker threads (jobs API / FastAPI threadpool), so
     # bridging the async fetcher with asyncio.run() is safe here.
     messages, truncated = asyncio.run(_fetch_all(params, progress))
+
+    progress(80.0, "fetching emotes")
+    twitch_id = None
+    for m in messages:
+        if m.tags and "room-id" in m.tags:
+            twitch_id = str(m.tags["room-id"])
+            break
+
+    emote_map = asyncio.run(fetch_channel_emotes(params.channel, twitch_id))
+
     progress(82.0, "building dataframe")
     df = messages_to_frame(messages)
+
     log_cache.save(
         fp,
         df,
@@ -298,9 +378,11 @@ def run(
             "immutable": log_cache.is_immutable_range(params.from_date, params.to_date),
             "truncated": truncated,
             "message_count": df.height,
+            "twitch_id": twitch_id,
         },
     )
     stats = compute_stats(df, params.top_n)
+    stats["top_emotes"] = _count_emotes_from_frame(df, emote_map)
     stats["truncated"] = truncated
     progress(100.0, "done")
     return Result(**stats)
