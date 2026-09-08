@@ -85,6 +85,27 @@ def test_top_words_filters_stopwords_and_short_tokens():
     assert stats["avg_message_length"] == len("Hello hello the a x PogChamp")
 
 
+def test_catalog_emote_names_excluded_from_top_words():
+    rows = [
+        ("a", "Kappa hello world", datetime(2024, 1, 15, 10, 0, tzinfo=UTC)),
+        ("b", "KEKW hello", datetime(2024, 1, 15, 11, 0, tzinfo=UTC)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), 20, {"25": "Kappa", "b1": "KEKW"})
+    words = {w["word"]: w["count"] for w in stats["top_words"]}
+    assert "kappa" not in words
+    assert "kekw" not in words
+    assert words.get("hello") == 2
+    assert words.get("world") == 1
+
+
+def test_extra_stopwords_exclude_native_emote_names():
+    rows = [("a", "Kappa hello", datetime(2024, 1, 15, 10, 0, tzinfo=UTC))]
+    stats = cs.compute_stats(make_frame(rows), 20, {}, frozenset({"kappa"}))
+    words = {w["word"] for w in stats["top_words"]}
+    assert "kappa" not in words
+    assert "hello" in words
+
+
 def test_empty_frame_returns_zeroed_shapes():
     stats = cs.compute_stats(cs.messages_to_frame([]), top_n=20)
     assert stats["total_messages"] == 0

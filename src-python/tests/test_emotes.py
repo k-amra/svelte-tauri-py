@@ -76,6 +76,18 @@ def test_count_falls_back_to_text_matching_without_tags():
     assert chat_stats._count_emotes_from_frame(df, {"25": "Kappa"}) == [{"name": "Kappa", "count": 1}]
 
 
+def test_count_is_case_sensitive():
+    df = chat_stats.messages_to_frame([tagged_msg("a", "LULW lulw LULW", None)])
+    assert chat_stats._count_emotes_from_frame(df, {"x": "LULW"}) == [{"name": "LULW", "count": 2}]
+
+
+def test_count_keeps_underscored_names_whole():
+    df = chat_stats.messages_to_frame([tagged_msg("a", "monkaS_Steer hello monkaS_Steer", None)])
+    assert chat_stats._count_emotes_from_frame(df, {"m": "monkaS_Steer"}) == [
+        {"name": "monkaS_Steer", "count": 2}
+    ]
+
+
 def test_count_missing_column_returns_empty():
     df = pl.DataFrame({"username": ["a"], "text": ["hi"]})
     assert chat_stats._count_emotes_from_frame(df, {"25": "Kappa"}) == []
@@ -170,3 +182,5 @@ def test_run_includes_top_emotes_and_twitch_id(monkeypatch):
     result = chat_stats.run(chat_stats.Params(channel="chan"))
     assert result.top_emotes == [chat_stats.EmoteCount(name="Kappa", count=2)]
     assert result.from_cache is False
+    # Native emote names must not leak into the vocabulary stats.
+    assert all(w.word != "kappa" for w in result.top_words)

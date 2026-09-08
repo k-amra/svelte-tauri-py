@@ -50,7 +50,7 @@ STOPWORDS = frozenset(
         "te", "ta", "ten", "go", "mu", "sie", "na", "co", "jak",
         "nie", "ale", "jest", "bo", "tak", "ty", "ja", "po", "ze", "dla",
         "oraz", "lub", "albo", "czy", "przy", "bez", "nad", "pod", "tylko",
-        "bardzo", "mo", "ju", "tu", "tam",
+        "bardzo", "mo", "ju", "tu", "tam", "za", "si",
         # URL noise
         "https", "http", "com", "www",
     }
@@ -163,15 +163,32 @@ def _empty_stats() -> dict:
     }
 
 
-def compute_stats(df: pl.DataFrame, top_n: int) -> dict:
+def compute_stats(
+    df: pl.DataFrame,
+    top_n: int,
+    emote_map: dict[str, str] | None = None,
+    extra_stopwords: frozenset[str] = frozenset(),
+) -> dict:
     """Pure analytics layer: frame in, JSON-serializable stats out.
 
     No network, no progress — fully unit-testable. All lists are capped
     (`top_n`, 50 words) so the result stays small enough to ride through
     job polling/SSE.
+
+    Third-party emotes travel as plain text, so without filtering they
+    pollute the vocabulary stats. `emote_map` names (lowercased, matching
+    the lowercased word pipeline) plus caller-supplied `extra_stopwords`
+    (e.g. native emote names extracted from IRC tags in this same run)
+    are excluded from `top_words`.
     """
     if df.is_empty():
         return _empty_stats()
+
+    stopwords = STOPWORDS | extra_stopwords
+    if emote_map:
+        # Emotes are case-sensitive in chat, but top_words lowercases
+        # everything — merge accordingly.
+        stopwords = stopwords | {name.lower() for name in emote_map.values()}
 
     total = df.height
     dates = df["ts"].dt.date()
@@ -226,7 +243,7 @@ def compute_stats(df: pl.DataFrame, top_n: int) -> dict:
         )
         .explode("w", empty_as_null=True)
         .drop_nulls("w")
-        .filter(~pl.col("w").is_in(STOPWORDS))
+        .filter(~pl.col("w").is_in(list(stopwords)))
         .group_by("w")
         .len()
         .sort("len", descending=True)
@@ -288,14 +305,26 @@ def _count_emotes_from_frame(df: pl.DataFrame, emote_map: dict[str, str]) -> lis
                     name = f"[{emote_id}]"
                 named_counts[name] = named_counts.get(name, 0) + 1
 
-    # Third-party emotes never appear in the IRC tag: match catalog names.
+    # Third-party emotes never appear in the IRC tag: match catalog names
+    # as whole tokens. Pure polars (explode/filter/group_by) so even 200k
+    # messages stay in the millisecond range. Matching is case-sensitive and
+    # keeps underscores whole (monkaS_Steer); names already seen via tags are
+    # excluded so nothing is double-counted.
     if emote_map and "text" in df.columns:
-        known_names = set(emote_map.values()) - set(named_counts)
+        known_names = sorted(set(emote_map.values()) - set(named_counts))
         if known_names:
-            for text in df["text"].to_list():
-                for word in str(text).split():
-                    if word in known_names:
-                        named_counts[word] = named_counts.get(word, 0) + 1
+            catalog_counts = (
+                df.select(pl.col("text").str.extract_all(r"[A-Za-z0-9_]+").alias("w"))
+                .explode("w", empty_as_null=True)
+                .drop_nulls("w")
+                .filter(pl.col("w").is_in(known_names))
+                .group_by("w")
+                .len()
+            )
+            for name, count in zip(
+                catalog_counts["w"].to_list(), catalog_counts["len"].to_list(), strict=True
+            ):
+                named_counts[name] = named_counts.get(name, 0) + int(count)
 
     top_emotes = sorted(named_counts.items(), key=lambda item: item[1], reverse=True)[:TOP_WORDS]
     return [{"name": name, "count": count} for name, count in top_emotes]
@@ -340,8 +369,14 @@ def run(
         twitch_id = meta.get("twitch_id")
         emote_map = asyncio.run(fetch_channel_emotes(params.channel, twitch_id))
 
-        stats = compute_stats(df, params.top_n)
-        stats["top_emotes"] = _count_emotes_from_frame(df, emote_map)
+        top_emotes = _count_emotes_from_frame(df, emote_map)
+        stats = compute_stats(
+            df,
+            params.top_n,
+            emote_map,
+            frozenset(e["name"].lower() for e in top_emotes),
+        )
+        stats["top_emotes"] = top_emotes
         stats["truncated"] = bool(meta.get("truncated", False))
         stats["from_cache"] = True
         fetched_at = meta.get("fetched_at")
@@ -381,8 +416,14 @@ def run(
             "twitch_id": twitch_id,
         },
     )
-    stats = compute_stats(df, params.top_n)
-    stats["top_emotes"] = _count_emotes_from_frame(df, emote_map)
+    top_emotes = _count_emotes_from_frame(df, emote_map)
+    stats = compute_stats(
+        df,
+        params.top_n,
+        emote_map,
+        frozenset(e["name"].lower() for e in top_emotes),
+    )
+    stats["top_emotes"] = top_emotes
     stats["truncated"] = truncated
     progress(100.0, "done")
     return Result(**stats)
