@@ -7,11 +7,14 @@ Params / Result / NAME / DESCRIPTION / run(). No router changes needed.
 from __future__ import annotations
 
 import importlib
+import logging
 import pkgutil
 import sys
 from types import ModuleType
 
 import app.scripts as scripts_pkg
+
+log = logging.getLogger(__name__)
 
 # PyInstaller puts imported modules in its PYZ archive, where filesystem
 # discovery is not reliable. Keep this list in sync with api_server.spec.
@@ -30,7 +33,11 @@ def discover() -> dict[str, ModuleType]:
     for name in sorted(names):
         if name.startswith("_") or name == "registry":
             continue
-        module = importlib.import_module(f"app.scripts.{name}")
+        try:
+            module = importlib.import_module(f"app.scripts.{name}")
+        except Exception as e:
+            log.error("Failed to import script '%s': %s — skipping", name, e)
+            continue
         name = getattr(module, "NAME", name)
         if not hasattr(module, "run"):
             continue

@@ -1,7 +1,7 @@
 mod commands;
 mod sidecar;
 use commands::default::{read, write};
-use sidecar::{BackendState, SidecarChild};
+use sidecar::{BackendState, DevChild, SidecarChild};
 use std::sync::Mutex;
 
 #[allow(clippy::missing_panics_doc)]
@@ -11,6 +11,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(BackendState(Mutex::new(None)))
         .manage(SidecarChild(Mutex::new(None)))
+        .manage(DevChild(Mutex::new(None)))
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

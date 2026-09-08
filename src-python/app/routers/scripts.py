@@ -18,7 +18,9 @@ async def list_scripts():
 
 
 @router.post("/scripts/{name}/run")
-async def run_script(name: str, params: dict):
+def run_script(name: str, params: dict):
+    # Sync endpoint: FastAPI offloads it to a threadpool so blocking
+    # script code (e.g. time.sleep) never freezes the event loop.
     from app.scripts import registry
 
     mod = registry.REGISTRY.get(name)

@@ -4,14 +4,11 @@ Simple boilerplate for Tauri 2 with Svelte 5 (and shadcn-svelte).
 
 ## Requirements
 
-In order to run this boilerplate, you need to install Node (via nvm) and Rust. If you are on Windows I also recommend installing MSVC before the other dependencies (make sure to check the "Desktop development with C++" workload).
-
-Some useful links:
-
-- https://github.com/coreybutler/nvm-windows/releases (Windows: pick the nvm installer)
-- https://github.com/nvm-sh/nvm?tab=readme-ov-file#installing-and-updating (Linux: run `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash`)
-- https://www.rust-lang.org/tools/install
-- https://visualstudio.microsoft.com/vs/community/
+- [Rust](https://www.rust-lang.org/tools/install) (stable toolchain)
+- [Bun](https://bun.sh) (package manager & runtime)
+- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- **Windows only:** MSVC Build Tools ("Desktop development with C++" workload, see https://visualstudio.microsoft.com/vs/community/)
+- **Linux:** `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
 
 ## Setup
 

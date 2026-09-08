@@ -9,7 +9,7 @@ Contract (see plan.md §4 + AGENTS.md):
 from __future__ import annotations
 
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from pydantic import BaseModel, Field
 

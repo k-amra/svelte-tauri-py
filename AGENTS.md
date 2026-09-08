@@ -21,7 +21,7 @@ Rust is ONLY for process lifecycle and native OS access — do not add business 
 
 1. Create `src-python/app/scripts/<name>.py` with `Params`, `Result` (Pydantic), `NAME`, `DESCRIPTION`, `run()`.
 2. It is auto-registered via `registry.py`. Do not edit routers for this.
-3. Regenerate TS types: `bun run gen:types` (pulls `/openapi.json` from a running backend).
+3. Regenerate TS types: start `bun run gen:types:serve` (backend on :8000 with docs enabled), then `bun run gen:types` (pulls `/openapi.json`).
 4. Add a Svelte component that calls `api.runScript("<name>", params)`.
 5. Write a test in `src-python/tests/test_<name>.py`.
 
@@ -29,8 +29,8 @@ Rust is ONLY for process lifecycle and native OS access — do not add business 
 
 - `bun run tauri:dev` — Tauri dev + Python via uv (hot reload, `SIDECAR_DEV=1`)
 - `bun run tauri:dev:binary` — Tauri dev against the prebuilt PyInstaller binary
-- `bun run build:sidecar` — PyInstaller (onedir) → `src-tauri/binaries/`
-- `bun run build` — sidecar + frontend (`vite build`); `bun run tauri:build` for the full installer
+- `bun run build:sidecar` — PyInstaller (onefile) → `src-tauri/binaries/`
+- `bun run build` — sidecar + frontend (`vite build`); `bun run build:app` for the full installer
 - `bun run test:python` — `uv run pytest` in `src-python/`
 - `bun run test:unit` — Vitest; `bun run test:rust` — `cargo test`
 - `bun run check` — svelte-check + tsc; `bun run lint` — prettier + eslint

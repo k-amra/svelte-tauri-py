@@ -10,31 +10,43 @@ Startup contract with Rust (sidecar.rs):
 
 from __future__ import annotations
 
-import argparse
+import os
+import secrets
 import socket
-import sys
+from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import parse_args
 
 
-def get_free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Single shared httpx client for all harambelogs endpoints."""
+    app.state.http_client = httpx.AsyncClient(
+        base_url="https://harambelogs.pl",
+        timeout=30.0,
+        headers={"User-Agent": "TauriSidecar/1.0 (HarambelogsClient)"},
+    )
+    yield
+    await app.state.http_client.aclose()
 
 
-def create_app(token: str) -> FastAPI:
+def create_app(token: str, *, enable_docs: bool = False) -> FastAPI:
     async def verify(request: Request) -> None:
         auth = request.headers.get("authorization", "")
-        if auth != f"Bearer {token}":
+        if not secrets.compare_digest(auth, f"Bearer {token}"):
             raise HTTPException(401, "invalid token")
 
-    app = FastAPI(title="api-server")
+    app = FastAPI(
+        title="api-server",
+        lifespan=lifespan,
+        openapi_url="/openapi.json" if enable_docs else None,
+        docs_url="/docs" if enable_docs else None,
+        redoc_url="/redoc" if enable_docs else None,
+    )
     app.state.token = token
     app.state.verify_token = verify
 
@@ -58,14 +70,17 @@ def create_app(token: str) -> FastAPI:
 
     @app.post("/shutdown", dependencies=[Depends(verify)])
     async def shutdown(request: Request):
+        from app.core.jobs import jobs
+
+        jobs.request_shutdown()
         server = getattr(request.app.state, "server", None)
         if server is not None:
             server.should_exit = True
         return {"status": "shutting down"}
 
+    from app.routers import harambelogs as harambelogs_router
     from app.routers import jobs as jobs_router
     from app.routers import scripts as scripts_router
-    from app.routers import harambelogs as harambelogs_router
 
     app.include_router(scripts_router.router, prefix="/api", dependencies=[Depends(verify)])
     app.include_router(jobs_router.router, prefix="/api", dependencies=[Depends(verify)])
@@ -76,9 +91,27 @@ def create_app(token: str) -> FastAPI:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    port = args.port if args.port else get_free_port()
 
-    app = create_app(args.token)
+    sockets = None
+    if args.port:
+        port = args.port
+    else:
+        # Bind + listen NOW and hand the open socket to uvicorn: closing and
+        # rebinding later would let another process steal the port in between
+        # (TOCTOU race). NOTE: uvicorn's Config(fd=...) is Unix-only systemd
+        # socket activation (AF_UNIX) — broken on Windows. serve(sockets=[...])
+        # is the cross-platform equivalent.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(128)
+        port = sock.getsockname()[1]
+        sockets = [sock]
+
+    # Docs/openapi.json only in dev (SIDECAR_DEV=1); production has no
+    # unauthenticated schema browser.
+    enable_docs = os.environ.get("SIDECAR_DEV") == "1"
+    app = create_app(args.token, enable_docs=enable_docs)
 
     # Rust waits for exactly this line.
     print(f"READY {port}", flush=True)
@@ -88,7 +121,7 @@ def main(argv: list[str] | None = None) -> None:
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
     app.state.server = server
-    server.run()
+    server.run(sockets=sockets)
 
 
 if __name__ == "__main__":

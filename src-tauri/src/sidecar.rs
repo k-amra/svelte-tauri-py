@@ -32,6 +32,9 @@ pub struct BackendState(pub Mutex<Option<Backend>>);
 /// Kept so we can kill on exit as a fallback after POST /shutdown.
 pub struct SidecarChild(pub Mutex<Option<CommandChild>>);
 
+/// Holds the std::process::Child for dev-mode so we can kill it on exit.
+pub struct DevChild(pub Mutex<Option<std::process::Child>>);
+
 fn app_data_dir(app: &AppHandle) -> String {
     let dir = app
         .path()
@@ -201,16 +204,24 @@ fn spawn_dev(app: &AppHandle, token: &str, data_dir: &str) {
         };
         cmd.current_dir(root);
     }
+    let Ok(mut child) = cmd.spawn() else {
+        log::error!(
+            "SIDECAR_DEV: failed to spawn `uv run python -m app.main` (is uv installed?)"
+        );
+        return;
+    };
+
+    // Take stdout out BEFORE storing the child handle.
+    let stdout = child.stdout.take().expect("piped stdout");
+
+    // Store the child so shutdown() can kill it as a fallback.
+    if let Some(state) = app.try_state::<DevChild>() {
+        *state.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+    }
+
     let handle = app.clone();
     let token = token.to_string();
     std::thread::spawn(move || {
-        let Ok(mut child) = cmd.spawn() else {
-            log::error!(
-                "SIDECAR_DEV: failed to spawn `uv run python -m app.main` (is uv installed?)"
-            );
-            return;
-        };
-        let stdout = child.stdout.take().expect("piped stdout");
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
             let line = line.trim().to_string();
@@ -219,9 +230,7 @@ fn spawn_dev(app: &AppHandle, token: &str, data_dir: &str) {
                 on_ready(&handle, port, token.clone());
             }
         }
-        // Keep the child handle alive until exit.
-        let _ = child.wait();
-        log::info!("sidecar-dev process exited");
+        log::info!("sidecar-dev stdout closed (process likely exited)");
     });
 }
 
@@ -246,19 +255,29 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
     tauri::async_runtime::spawn(async move {
         let start = Instant::now();
         let timeout = Duration::from_secs(30);
+        let mut ready_sent = false;
+
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(bytes) => {
                     let line = String::from_utf8_lossy(&bytes);
                     for l in line.lines() {
-                        if let Some(port) = parse_ready_line(l.trim()) {
-                            let ready_handle = handle.clone();
-                            let ready_token = token.clone();
-                            std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
-                                on_ready(&ready_handle, port, ready_token);
-                            }));
-                            return;
+                        let trimmed = l.trim();
+                        if !ready_sent {
+                            if let Some(port) = parse_ready_line(trimmed) {
+                                let ready_handle = handle.clone();
+                                let ready_token = token.clone();
+                                std::mem::drop(tauri::async_runtime::spawn_blocking(
+                                    move || {
+                                        on_ready(&ready_handle, port, ready_token);
+                                    },
+                                ));
+                                ready_sent = true;
+                                continue;
+                            }
                         }
+                        // Keep draining after READY so the pipe never fills up.
+                        log::debug!("[sidecar] {trimmed}");
                     }
                 }
                 CommandEvent::Stderr(bytes) => {
@@ -266,6 +285,10 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
                 }
                 CommandEvent::Terminated(payload) => {
                     log::warn!("sidecar terminated: {:?}", payload.code);
+                    if let Some(state) = handle.try_state::<BackendState>() {
+                        *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    }
+                    let _ = handle.emit("backend-gone", ());
                     return;
                 }
                 CommandEvent::Error(e) => {
@@ -274,7 +297,7 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
                 }
                 _ => {}
             }
-            if start.elapsed() > timeout {
+            if !ready_sent && start.elapsed() > timeout {
                 log::error!("timed out waiting for READY from sidecar");
                 return;
             }
@@ -320,6 +343,19 @@ pub fn shutdown(app: &AppHandle) {
             .take()
         {
             let _ = child.kill();
+        }
+    }
+
+    // Kill dev-mode sidecar (std::process::Child) as a fallback.
+    if let Some(dev_state) = app.try_state::<DevChild>() {
+        if let Some(mut child) = dev_state
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait(); // reap
         }
     }
 }

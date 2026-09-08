@@ -1,3 +1,7 @@
+> ⚠️ **SUPERSEDED** — This document contains the original design exploration.
+> The final implementation uses **onefile** mode (not onedir).
+> See `AGENTS.md` → "Packaging & release" for the authoritative contract.
+
 I'll look at the template and current Tauri 2 sidecar patterns to give you an accurate proposal.Here's a proposal for the architecture, based on that template plus the established Tauri 2 → Python sidecar pattern.
 
 ## 1. What you're combining

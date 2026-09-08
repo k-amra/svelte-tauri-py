@@ -93,14 +93,19 @@ export const api = {
 	},
 
 	/** Poll GET /api/jobs/{id} until done/error (simple; use SSE endpoint for live logs). */
-	async waitJob(jobId: string, onProgress?: (j: JobStatus) => void): Promise<JobStatus> {
-		for (let i = 0; i < 150; i++) {
+	async waitJob(
+		jobId: string,
+		onProgress?: (j: JobStatus) => void,
+		timeoutMs = 600_000
+	): Promise<JobStatus> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
 			const j = await api.getJob(jobId);
 			onProgress?.(j);
 			if (j.status === 'done' || j.status === 'error') return j;
 			await new Promise((r) => setTimeout(r, 200));
 		}
-		throw new Error(`job ${jobId} timed out`);
+		throw new Error(`job ${jobId} timed out after ${timeoutMs}ms`);
 	},
 
 	harambelogs: {

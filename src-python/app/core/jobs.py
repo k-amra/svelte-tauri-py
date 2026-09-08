@@ -11,8 +11,9 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 
 @dataclass
@@ -49,6 +50,11 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._max_history = 100
+        self._shutdown = threading.Event()
+
+    def request_shutdown(self) -> None:
+        """Signal running jobs to abort at their next progress() checkpoint."""
+        self._shutdown.set()
 
     def submit(self, script: str, func: Callable, params: Any) -> Job:
         job = Job(id=uuid.uuid4().hex[:12], script=script)
@@ -60,6 +66,8 @@ class JobManager:
 
     def _run(self, job: Job, func: Callable, params: Any) -> None:
         def progress(pct: float, msg: str = "") -> None:
+            if self._shutdown.is_set():
+                raise InterruptedError("server shutting down")
             with self._lock:
                 job.push(pct, msg)
 

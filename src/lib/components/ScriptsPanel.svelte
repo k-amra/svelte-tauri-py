@@ -82,7 +82,7 @@
 		let disposed = false;
 
 		const initialize = async () => {
-			await backend.init();
+			// backend.init() is owned by App.svelte — just wait for ready.
 			if (disposed) return;
 			if (backend.ready) {
 				await refresh();
@@ -106,7 +106,7 @@
 			disposed = true;
 			if (pollTimer) clearInterval(pollTimer);
 			if (timeoutTimer) clearTimeout(timeoutTimer);
-			void backend.dispose();
+			// Do NOT call backend.dispose() here — lifecycle is owned by App.svelte.
 		};
 	});
 

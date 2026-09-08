@@ -28,6 +28,8 @@ async function fetchBackend(): Promise<boolean> {
 		}
 	} catch (e) {
 		// Not ready yet (or running in plain `vite dev` without Tauri).
+		// Don't set status 'error' here — the backend may still be starting.
+		// 'error' is set by the backend-gone listener below.
 		error = e instanceof Error ? e.message : String(e);
 	}
 	return false;
@@ -50,11 +52,22 @@ async function initializeBackend(runLifecycle: number): Promise<void> {
 		port = e.payload;
 		await fetchBackend();
 	});
+	const unlistenGone = await listen('backend-gone', () => {
+		if (disposed || lifecycle !== runLifecycle) return;
+		port = 0;
+		token = '';
+		status = 'error';
+		error = 'Backend process terminated unexpectedly';
+	});
 	if (disposed || lifecycle !== runLifecycle) {
 		unlisten();
+		unlistenGone();
 		return;
 	}
-	unlistenBackendReady = unlisten;
+	unlistenBackendReady = () => {
+		unlisten();
+		unlistenGone();
+	};
 
 	const ok = await fetchBackend();
 	if (!ok && !disposed && lifecycle === runLifecycle) {

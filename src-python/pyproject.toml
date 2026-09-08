@@ -15,11 +15,23 @@ dependencies = [
 dev = [
   "pyinstaller>=6.0",
   "pytest>=8.0",
+  "ruff>=0.11",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "strict"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+  "E501", # line length is enforced by the formatter, not the linter
+  # FastAPI requires Query()/Path() calls in argument defaults (idiomatic, not a bug).
+  "B008",
+]
 
 [tool.pyinstaller]
 # kept for documentation; real options live in api_server.spec

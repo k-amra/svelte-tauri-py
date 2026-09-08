@@ -39,14 +39,37 @@ def test_scripts_requires_token():
 
 def test_harambelogs_search_validates_query():
     c = make_client()
-    r = c.get("/api/harambelogs/search/xqc/xqc", headers=auth_headers())
-    assert r.status_code == 422
-
+    # Missing required `q` param → 422
     r = c.get(
-        "/api/harambelogs/search/xqc/xqc?q=hello&limit=101",
+        "/api/harambelogs/search/channel/xqc/user/xqc",
         headers=auth_headers(),
     )
     assert r.status_code == 422
+
+    # limit=1001 exceeds le=1000 → 422
+    r = c.get(
+        "/api/harambelogs/search/channel/xqc/user/xqc?q=hello&limit=1001",
+        headers=auth_headers(),
+    )
+    assert r.status_code == 422
+
+
+def test_frozen_modules_covers_all_scripts():
+    """FROZEN_MODULES must list every script module for PyInstaller."""
+    import pkgutil
+
+    import app.scripts as scripts_pkg
+    from app.scripts.registry import FROZEN_MODULES
+
+    disk_names = {
+        m.name
+        for m in pkgutil.iter_modules(scripts_pkg.__path__)
+        if not m.name.startswith("_") and m.name != "registry"
+    }
+    assert set(FROZEN_MODULES) == disk_names, (
+        f"FROZEN_MODULES {set(FROZEN_MODULES)} != disk scripts {disk_names}. "
+        "Update FROZEN_MODULES in registry.py AND hiddenimports in api_server.spec."
+    )
 
 
 def test_list_and_run_example():
