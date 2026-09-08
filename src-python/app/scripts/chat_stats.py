@@ -22,6 +22,7 @@ from typing import Literal
 import polars as pl
 from pydantic import BaseModel, Field
 
+from app.services import log_cache
 from app.services.harambelogs_client import HarambelogsAPI
 from app.services.harambelogs_models import FullMessage
 from app.services.log_fetch import fetch_channel_logs
@@ -61,6 +62,7 @@ class Params(BaseModel):
     from_date: datetime | None = None
     to_date: datetime | None = None
     top_n: int = Field(20, ge=5, le=100)
+    force_refresh: bool = False  # bypass the cache and re-download
 
 
 class TopChatterStat(BaseModel):
@@ -84,6 +86,8 @@ class Result(BaseModel):
     days_spanned: int
     avg_message_length: float
     truncated: bool
+    from_cache: bool = False
+    cached_at: str | None = None  # ISO time of the original fetch (string: SSE-safe)
     top_chatters: list[TopChatterStat]
     activity_by_hour: list[int]  # len 24, UTC
     activity_by_weekday_hour: list[list[int]]  # 7 x 24, Monday-first, UTC
@@ -262,12 +266,41 @@ async def _fetch_all(
 def run(
     params: Params, progress: Callable[[float, str], None] = lambda pct, msg="": None
 ) -> Result:
+    fp = log_cache.fingerprint(params.channel_id_type, params.channel, params.from_date, params.to_date)
+
+    cached = None if params.force_refresh else log_cache.load(fp)
+    if cached is not None:
+        df, meta = cached
+        progress(80.0, f"cache hit: {meta.get('message_count', df.height)} messages")
+        stats = compute_stats(df, params.top_n)
+        stats["truncated"] = bool(meta.get("truncated", False))
+        stats["from_cache"] = True
+        fetched_at = meta.get("fetched_at")
+        stats["cached_at"] = datetime.fromtimestamp(fetched_at, UTC).isoformat() if fetched_at else None
+        progress(100.0, "done (cached)")
+        return Result(**stats)
+
     progress(2.0, "connecting")
     # Scripts run in worker threads (jobs API / FastAPI threadpool), so
     # bridging the async fetcher with asyncio.run() is safe here.
     messages, truncated = asyncio.run(_fetch_all(params, progress))
     progress(82.0, "building dataframe")
-    stats = compute_stats(messages_to_frame(messages), params.top_n)
+    df = messages_to_frame(messages)
+    log_cache.save(
+        fp,
+        df,
+        {
+            "channel": params.channel,
+            "channel_id_type": params.channel_id_type,
+            "from": params.from_date.isoformat() if params.from_date else None,
+            "to": params.to_date.isoformat() if params.to_date else None,
+            "fetched_at": datetime.now(UTC).timestamp(),
+            "immutable": log_cache.is_immutable_range(params.from_date, params.to_date),
+            "truncated": truncated,
+            "message_count": df.height,
+        },
+    )
+    stats = compute_stats(df, params.top_n)
     stats["truncated"] = truncated
     progress(100.0, "done")
     return Result(**stats)

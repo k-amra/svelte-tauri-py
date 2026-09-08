@@ -19,6 +19,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core import paths
 from app.core.config import parse_args
 
 
@@ -91,6 +92,7 @@ def create_app(token: str, *, enable_docs: bool = False) -> FastAPI:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    paths.init(args.data_dir)  # everything persistent lives under here
 
     sockets = None
     if args.port:

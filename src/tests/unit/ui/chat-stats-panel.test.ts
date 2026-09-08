@@ -20,6 +20,8 @@ const fakeStats: ChatStatsResult = {
 	days_spanned: 3,
 	avg_message_length: 12.5,
 	truncated: false,
+	from_cache: false,
+	cached_at: null,
 	top_chatters: [
 		{ username: 'alice', messageCount: 30 },
 		{ username: 'bob', messageCount: 12 }
@@ -103,6 +105,37 @@ describe('ChatStatsPanel', () => {
 		});
 		expect(screen.getByText('alice')).toBeInTheDocument();
 		expect(screen.getByText('Weekday × hour heatmap (UTC)')).toBeInTheDocument();
+	});
+
+	it('shows the cache note and sends force_refresh when bypass is ticked', async () => {
+		const cached: JobStatus = {
+			...doneJob(),
+			result: { ...fakeStats, from_cache: true, cached_at: '2024-01-15T10:30:00+00:00' }
+		};
+		mockCreateJob.mockResolvedValueOnce({
+			job_id: 'abc123',
+			script: 'chat_stats',
+			status: 'running',
+			progress: 0,
+			message: '',
+			result: null,
+			error: null
+		});
+		mockWaitJob.mockResolvedValueOnce(cached);
+
+		render(ChatStatsPanel);
+		await fireEvent.click(screen.getByText('Bypass cache (re-download)'));
+		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
+
+		await waitFor(() => {
+			expect(mockCreateJob).toHaveBeenCalledWith(
+				'chat_stats',
+				expect.objectContaining({ force_refresh: true })
+			);
+		});
+		await waitFor(() => {
+			expect(screen.getByText(/Loaded from local cache/)).toBeInTheDocument();
+		});
 	});
 
 	it('requires a channel before spending a job', async () => {

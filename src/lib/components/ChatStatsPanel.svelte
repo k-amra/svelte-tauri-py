@@ -13,6 +13,7 @@
 	let fromDate = $state('');
 	let toDate = $state('');
 	let topN = $state(20);
+	let forceRefresh = $state(false);
 	let loading = $state(false);
 	let error = $state('');
 	let jobProgress = $state<number | null>(null);
@@ -58,7 +59,8 @@
 				channel_id_type: channelType,
 				from_date: toRFC3339(fromDate),
 				to_date: toRFC3339(toDate),
-				top_n: topN
+				top_n: topN,
+				force_refresh: forceRefresh
 			});
 			const done = await api.waitJob(job.job_id, (j) => {
 				jobProgress = j.progress;
@@ -152,11 +154,27 @@
 			<p class="text-sm text-red-500">{error}</p>
 		{/if}
 
+		<label class="flex cursor-pointer items-center gap-2 text-sm">
+			<input
+				type="checkbox"
+				bind:checked={forceRefresh}
+				class="accent-primary h-4 w-4 rounded border-gray-300"
+			/>
+			<span>Bypass cache (re-download)</span>
+		</label>
+
 		<Button onclick={runStats} disabled={loading || !backend.ready} class="w-full">
 			{loading ? 'Analyzing…' : 'Run stats'}
 		</Button>
 
 		{#if stats}
+			{#if stats.from_cache}
+				<p class="text-muted-foreground text-sm">
+					Loaded from local cache{stats.cached_at
+						? ` (fetched ${new Date(stats.cached_at).toLocaleString()})`
+						: ''} — tick "Bypass cache" to re-download.
+				</p>
+			{/if}
 			{#if stats.truncated}
 				<p class="text-sm text-amber-500">
 					Result truncated: channel exceeded the fetch cap — stats cover a partial window.

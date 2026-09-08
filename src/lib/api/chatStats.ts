@@ -24,6 +24,10 @@ export interface ChatStatsResult {
 	days_spanned: number;
 	avg_message_length: number;
 	truncated: boolean;
+	/** True when the result came from the on-disk cache (no re-download). */
+	from_cache: boolean;
+	/** ISO timestamp of the original fetch when from_cache, else null. */
+	cached_at: string | null;
 	top_chatters: TopChatterStat[];
 	/** 24 buckets, UTC hour of day. */
 	activity_by_hour: number[];
