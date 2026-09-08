@@ -41,14 +41,14 @@ def test_harambelogs_search_validates_query():
     c = make_client()
     # Missing required `q` param → 422
     r = c.get(
-        "/api/harambelogs/search/channel/xqc/user/xqc",
+        "/api/harambelogs/search/channel/demonzz1/user/demonzz1",
         headers=auth_headers(),
     )
     assert r.status_code == 422
 
     # limit=1001 exceeds le=1000 → 422
     r = c.get(
-        "/api/harambelogs/search/channel/xqc/user/xqc?q=hello&limit=1001",
+        "/api/harambelogs/search/channel/demonzz1/user/demonzz1?q=hello&limit=1001",
         headers=auth_headers(),
     )
     assert r.status_code == 422
