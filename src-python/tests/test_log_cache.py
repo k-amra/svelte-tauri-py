@@ -60,6 +60,39 @@ def test_eviction_enforces_cap(monkeypatch):
     assert log_cache.load(fp) is None
 
 
+def test_live_entry_promotes_to_immutable_once_to_ages_past():
+    fp = log_cache.fingerprint("channel", "promo", None, None)
+    old_to = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    log_cache.save(
+        fp,
+        _frame(),
+        {"fetched_at": time.time() - 2 * log_cache.LIVE_TTL_S, "immutable": False, "to": old_to},
+    )
+    hit = log_cache.load(fp)
+    assert hit is not None
+    assert hit[1]["immutable"] is True
+
+
+def test_open_ended_entry_never_promotes():
+    fp = log_cache.fingerprint("channel", "openended", None, None)
+    log_cache.save(
+        fp,
+        _frame(),
+        {"fetched_at": time.time() - 2 * log_cache.LIVE_TTL_S, "immutable": False, "to": None},
+    )
+    assert log_cache.load(fp) is None
+
+
+def test_malformed_to_never_promotes():
+    fp = log_cache.fingerprint("channel", "badto", None, None)
+    log_cache.save(
+        fp,
+        _frame(),
+        {"fetched_at": time.time() - 2 * log_cache.LIVE_TTL_S, "immutable": False, "to": "not-a-date"},
+    )
+    assert log_cache.load(fp) is None
+
+
 def test_range_immutable_only_when_safely_in_the_past():
     past = datetime.now(UTC) - timedelta(days=1)
     assert log_cache.is_immutable_range(None, past) is True

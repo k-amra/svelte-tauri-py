@@ -9,6 +9,9 @@ Validity rules:
   append-only, so the cached frame is immutable -> valid forever.
 - Range touching "now" (open end or recent `to`): new messages may have
   arrived -> valid for LIVE_TTL_S only.
+- Immutability is re-evaluated at load time from the stored range, so an
+  entry saved as live promotes itself to immutable once its `to` ages
+  safely into the past (open-ended entries never promote).
 
 Layout:
     <data-dir>/cache/chat_stats/v1/<fingerprint>.parquet   (username/text/ts)
@@ -78,6 +81,23 @@ def is_immutable_range(from_date: datetime | None, to_date: datetime | None) -> 
     return to_utc < datetime.now(UTC).replace(microsecond=0) - timedelta(seconds=IMMUTABLE_MARGIN_S)
 
 
+def _range_now_immutable(meta: dict) -> bool:
+    """Re-evaluate immutability at load time from the stored range.
+
+    The save-time flag freezes the verdict of that moment, but time moves
+    on: a range saved as live (recent `to`) becomes immutable once `to`
+    is safely in the past. Open-ended ranges (no `to`) stay live forever.
+    """
+    to_raw = meta.get("to")
+    if not to_raw:
+        return False
+    try:
+        to_date = datetime.fromisoformat(to_raw)
+    except (ValueError, TypeError):
+        return False
+    return is_immutable_range(None, to_date)
+
+
 def load(fp: str) -> tuple[pl.DataFrame, dict] | None:
     """Return (frame, metadata) on a valid cache hit, else None."""
     base = _dir() / fp
@@ -89,6 +109,8 @@ def load(fp: str) -> tuple[pl.DataFrame, dict] | None:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not meta.get("immutable") and _range_now_immutable(meta):
+        meta["immutable"] = True
     if not meta.get("immutable") and (time.time() - meta.get("fetched_at", 0.0)) >= LIVE_TTL_S:
         return None
     try:
