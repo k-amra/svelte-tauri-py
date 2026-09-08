@@ -111,6 +111,8 @@
 	);
 	const needsUserId = $derived(operation === 'namehistory');
 	const needsDateParts = $derived(['logs/channel/date', 'logs/user/month'].includes(operation));
+	// `list` accepts an empty channel (full list), so the field is shown but optional.
+	const needsChannelValue = $derived(needsChannel && operation !== 'list');
 
 	function clearResults() {
 		error = '';
@@ -135,7 +137,7 @@
 
 	/** Client-side required-field checks so empty inputs don't surface as server 422/404s. */
 	function validate(): string | null {
-		if (needsChannel && !channel.trim()) return 'Channel is required for this operation.';
+		if (needsChannelValue && !channel.trim()) return 'Channel is required for this operation.';
 		if (needsUser && !user.trim()) return 'User is required for this operation.';
 		if (needsQuery && !query.trim()) return 'Search query is required.';
 		if (needsUserId && !userId.trim()) return 'User ID is required.';

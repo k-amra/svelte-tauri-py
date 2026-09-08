@@ -167,6 +167,7 @@ fn on_ready(app: &AppHandle, port: u16, token: String) {
     log::info!("sidecar READY on port {port}");
     if !wait_for_health(port, Duration::from_secs(10)) {
         log::error!("sidecar on port {port} never passed /health");
+        let _ = app.emit("backend-gone", ());
         return;
     }
     if let Some(state) = app.try_state::<BackendState>() {
@@ -251,6 +252,7 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
         Ok(v) => v,
         Err(e) => {
             log::error!("failed to spawn sidecar `api-server`: {e} (did you run build:sidecar? check the target-triple suffix)");
+            let _ = app.emit("backend-gone", ());
             return;
         }
     };
@@ -328,6 +330,7 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
                 }
                 CommandEvent::Error(e) => {
                     log::error!("sidecar error: {e}");
+                    let _ = handle.emit("backend-gone", ());
                     return;
                 }
                 _ => {}

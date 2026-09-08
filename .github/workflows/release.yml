@@ -153,7 +153,7 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-24.04'
@@ -172,6 +172,7 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         env:
+          SIGN_COMMAND: ${{ secrets.SIGN_COMMAND }}
           # Fail the release if signing is not configured (never ship unsigned).
           SIGNING_REQUIRED: '1'
         run: powershell -File scripts/sign-sidecar.ps1 -Triple ${{ matrix.target }}
@@ -179,9 +180,22 @@ jobs:
         if: startsWith(matrix.platform, 'macos')
         shell: bash
         env:
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           # Fail the release if signing is not configured (never ship unsigned).
           SIGNING_REQUIRED: '1'
         run: bash scripts/sign-sidecar.sh ${{ matrix.target }}
+
+      - name: Require Apple signing secrets (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          SIGNING_REQUIRED: '1'
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "::error::APPLE_CERTIFICATE is empty and SIGNING_REQUIRED=1 — refusing to ship an unsigned macOS build."
+            exit 1
+          fi
 
       - name: Build Tauri
         uses: tauri-apps/tauri-action@v1
@@ -189,6 +203,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Reuse the signed sidecar: tauri build's beforeBuildCommand would
           # otherwise rebuild (and clobber the signature) via build-sidecar.mjs.
+          # NOTE: the skip check matches on the HOST triple (beforeBuildCommand
+          # runs without --target), so this only works while every matrix entry
+          # builds natively on its runner. A cross-compile entry would miss the
+          # guard and rebuild (wasted work, but no corruption: different filename).
           SIDECAR_PREBUILT: '1'
           # macOS app signing + notarization (tauri-action picks these up
           # automatically; empty secrets = unsigned, same as before).
