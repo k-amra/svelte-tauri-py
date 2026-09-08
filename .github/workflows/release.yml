@@ -117,10 +117,13 @@ jobs:
           - platform: 'macos-latest'
             args: '--target aarch64-apple-darwin'
             target: 'aarch64-apple-darwin'
-          # Intel Macs: PyInstaller can't cross-compile, so this needs its own runner.
-          - platform: 'macos-13'
-            args: '--target x86_64-apple-darwin'
-            target: 'x86_64-apple-darwin'
+          # Intel Macs: PyInstaller can't cross-compile, so this needs its own
+          # runner — but GitHub has retired all Intel-hosted macOS images
+          # (macos-13 and macos-15-intel). Re-add with a self-hosted Intel
+          # runner if x86_64-apple-darwin builds are needed again.
+          # - platform: 'self-hosted-macos-intel'
+          #   args: '--target x86_64-apple-darwin'
+          #   target: 'x86_64-apple-darwin'
           - platform: 'ubuntu-24.04'
             args: ''
             target: 'x86_64-unknown-linux-gnu'
@@ -137,7 +140,8 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Must match `packageManager` in package.json (lockfile stability).
+          bun-version: '1.4.2'
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
@@ -167,16 +171,33 @@ jobs:
       - name: Sign sidecar (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
+        env:
+          # Fail the release if signing is not configured (never ship unsigned).
+          SIGNING_REQUIRED: '1'
         run: powershell -File scripts/sign-sidecar.ps1 -Triple ${{ matrix.target }}
       - name: Sign sidecar (macOS)
         if: startsWith(matrix.platform, 'macos')
         shell: bash
+        env:
+          # Fail the release if signing is not configured (never ship unsigned).
+          SIGNING_REQUIRED: '1'
         run: bash scripts/sign-sidecar.sh ${{ matrix.target }}
 
       - name: Build Tauri
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Reuse the signed sidecar: tauri build's beforeBuildCommand would
+          # otherwise rebuild (and clobber the signature) via build-sidecar.mjs.
+          SIDECAR_PREBUILT: '1'
+          # macOS app signing + notarization (tauri-action picks these up
+          # automatically; empty secrets = unsigned, same as before).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_NAME: ${{ secrets.APPLE_TEAM_NAME }}
         with:
           tagName: ${{ needs.validate-release.outputs.tag }}
           releaseName: ${{ needs.validate-release.outputs.tag }}

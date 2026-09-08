@@ -3,6 +3,7 @@
 import argparse
 import os
 import secrets
+import sys
 
 
 def parse_args(argv: list[str] | None = None):
@@ -19,5 +20,15 @@ def parse_args(argv: list[str] | None = None):
         help="Writable directory passed by Rust (app_data_dir). Never write next to the binary.",
     )
     args = p.parse_args(argv)
-    args.token = args.token or os.environ.get("SIDECAR_TOKEN") or secrets.token_urlsafe(32)
+    provided = args.token or os.environ.get("SIDECAR_TOKEN")
+    if provided is None:
+        args.token = secrets.token_urlsafe(32)
+        # stderr (not stdout): Rust parses the READY line from stdout.
+        print(
+            f"[api-server] neither --token nor SIDECAR_TOKEN is set; "
+            f"generated ephemeral token: {args.token}",
+            file=sys.stderr,
+        )
+    else:
+        args.token = provided
     return args

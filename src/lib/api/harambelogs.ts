@@ -13,7 +13,7 @@ export interface FullMessage {
 	displayName: string;
 	timestamp: string;
 	id: string;
-	tags: Record<string, any>;
+	tags: Record<string, unknown>;
 	username: string;
 	channel: string;
 	raw: string;

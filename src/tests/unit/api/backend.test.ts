@@ -20,6 +20,8 @@ function listenHandler(event: string): (e: unknown) => unknown {
 describe('backend store', () => {
 	beforeEach(() => {
 		mockInvoke.mockReset();
+		// jsdom has no Tauri runtime: pretend we run inside the WebView.
+		(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
 	});
 
 	afterEach(async () => {
@@ -74,5 +76,19 @@ describe('backend store', () => {
 		await onReady({ payload: 9999 });
 
 		expect(backend.port).toBe(portBefore);
+	});
+
+	// Last: leaves status='detached', which would pollute the tests above
+	// (module-level store state persists across tests in this file).
+	it('stays detached without IPC outside Tauri (plain vite dev)', async () => {
+		await backend.dispose();
+		delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+		const listenCallsBefore = mockListen.mock.calls.length;
+		await backend.init();
+		expect(backend.status).toBe('detached');
+		expect(backend.ready).toBe(false);
+		expect(backend.error).toContain('Not running inside Tauri');
+		expect(mockInvoke).not.toHaveBeenCalled();
+		expect(mockListen.mock.calls.length).toBe(listenCallsBefore);
 	});
 });

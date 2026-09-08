@@ -8,6 +8,10 @@ param(
 $exe = "src-tauri/binaries/api-server-$Triple.exe"
 if (-not (Test-Path $exe)) { Write-Error "Missing $exe — run build:sidecar first"; exit 1 }
 if (-not $env:SIGN_COMMAND) {
+  if ($env:SIGNING_REQUIRED -eq '1') {
+    Write-Error "SIGN_COMMAND not set and SIGNING_REQUIRED=1 — refusing to ship an unsigned sidecar."
+    exit 1
+  }
   Write-Warning "SIGN_COMMAND not set — skipping sidecar signing (unsigned builds trigger SmartScreen)."
   exit 0
 }

@@ -22,7 +22,13 @@
 	let debugMode = $state(false);
 
 	const statusText = $derived(
-		backend.status === 'ready' ? `Backend ready :${backend.port}` : 'Backend starting…'
+		backend.status === 'ready'
+			? `Backend ready :${backend.port}`
+			: backend.status === 'detached'
+				? 'Detached mode (browser dev, no Tauri)'
+				: backend.status === 'error'
+					? 'Backend error — see Diagnostics'
+					: 'Backend starting…'
 	);
 	const diag = $derived(backend.debug());
 	const debugEntries = $derived(apiDebug.entries);

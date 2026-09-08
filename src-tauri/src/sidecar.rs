@@ -13,9 +13,16 @@
 
 use std::{
     io::{BufRead, BufReader},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
+
+/// shutdown() is called from ExitRequested + Exit (plus the manual command):
+/// run the sequence exactly once.
+static SHUTDOWN_ONCE: AtomicBool = AtomicBool::new(false);
 
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -253,31 +260,59 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
     let handle = app.clone();
     let token = token.to_string();
     tauri::async_runtime::spawn(async move {
-        let start = Instant::now();
         let timeout = Duration::from_secs(30);
         let mut ready_sent = false;
+        // `CommandEvent::Stdout` carries arbitrary byte chunks: a `READY <port>`
+        // line can be split across two events, so accumulate partial lines here.
+        let mut pending = String::new();
 
-        while let Some(event) = rx.recv().await {
+        // One complete stdout line: READY handshake (once) + drain logging.
+        let process_line = |handle: &AppHandle, token: &str, ready_sent: &mut bool, trimmed: &str| {
+            if !*ready_sent {
+                if let Some(port) = parse_ready_line(trimmed) {
+                    let ready_handle = handle.clone();
+                    let ready_token = token.to_string();
+                    std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+                        on_ready(&ready_handle, port, ready_token);
+                    }));
+                    *ready_sent = true;
+                    return;
+                }
+            }
+            // Keep draining after READY so the pipe never fills up.
+            log::debug!("[sidecar] {trimmed}");
+        };
+
+        loop {
+            // NOTE: the timeout wraps recv() itself. Checking elapsed time only
+            // after an event arrives would block forever on a silent hang
+            // (AV quarantine, stalled bootloader) — the UI must hear about it.
+            let event = match tokio::time::timeout(timeout, rx.recv()).await {
+                Err(_) if !ready_sent => {
+                    log::error!("timed out waiting for READY from sidecar (silent for 30s)");
+                    let _ = handle.emit("backend-gone", ());
+                    return;
+                }
+                // READY already seen: keep draining indefinitely.
+                Err(_) => continue,
+                Ok(None) => {
+                    // Channel closed: flush a final unterminated line, if any.
+                    if !pending.trim().is_empty() {
+                        process_line(&handle, &token, &mut ready_sent, pending.trim());
+                    }
+                    return;
+                }
+                Ok(Some(event)) => event,
+            };
             match event {
                 CommandEvent::Stdout(bytes) => {
-                    let line = String::from_utf8_lossy(&bytes);
-                    for l in line.lines() {
-                        let trimmed = l.trim();
-                        if !ready_sent {
-                            if let Some(port) = parse_ready_line(trimmed) {
-                                let ready_handle = handle.clone();
-                                let ready_token = token.clone();
-                                std::mem::drop(tauri::async_runtime::spawn_blocking(
-                                    move || {
-                                        on_ready(&ready_handle, port, ready_token);
-                                    },
-                                ));
-                                ready_sent = true;
-                                continue;
-                            }
+                    pending.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(pos) = pending.find('\n') {
+                        let line: String = pending.drain(..=pos).collect();
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            process_line(&handle, &token, &mut ready_sent, trimmed);
                         }
-                        // Keep draining after READY so the pipe never fills up.
-                        log::debug!("[sidecar] {trimmed}");
                     }
                 }
                 CommandEvent::Stderr(bytes) => {
@@ -297,10 +332,6 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
                 }
                 _ => {}
             }
-            if !ready_sent && start.elapsed() > timeout {
-                log::error!("timed out waiting for READY from sidecar");
-                return;
-            }
         }
     });
 }
@@ -319,6 +350,9 @@ pub fn spawn(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn shutdown(app: &AppHandle) {
+    if SHUTDOWN_ONCE.swap(true, Ordering::SeqCst) {
+        return;
+    }
     // 1) Graceful: HTTP /shutdown is the PRIMARY mechanism.
     //    (Tauri only knows the bootloader PID for PyInstaller binaries,
     //    so kill() alone orphans the real child.)

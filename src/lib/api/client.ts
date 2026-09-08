@@ -113,7 +113,7 @@ export const api = {
 
 		getCapabilities: (): Promise<string[]> => apiFetch('/api/harambelogs/capabilities'),
 
-		getList: (channel?: string, channels?: string[]): Promise<any> => {
+		getList: (channel?: string, channels?: string[]): Promise<unknown> => {
 			const params = new URLSearchParams();
 			if (channel) params.set('channel', channel);
 			if (channels) params.set('channels', channels.join(','));

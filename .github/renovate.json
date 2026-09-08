@@ -3,16 +3,14 @@
 	"enabledManagers": ["cargo", "github-actions", "npm"],
 	"packageRules": [
 		{
-			"matchUpdateTypes": ["patch"],
-			"enabled": false
-		},
-		{
 			"matchManagers": ["cargo"],
+			"matchUpdateTypes": ["minor", "patch"],
 			"automerge": true,
 			"minimumReleaseAge": "2 days"
 		},
 		{
 			"matchManagers": ["npm"],
+			"matchUpdateTypes": ["minor", "patch"],
 			"automerge": true,
 			"minimumReleaseAge": "2 days"
 		}

@@ -40,6 +40,19 @@ const triple = getTriple();
 const ext = process.platform === 'win32' ? '.exe' : '';
 console.log(`[build:sidecar] target triple: ${triple}`);
 
+const binDir = join(root, 'src-tauri', 'binaries');
+const destExe = join(binDir, `api-server-${triple}${ext}`);
+
+// The release pipeline builds + signs the sidecar BEFORE `tauri build`, whose
+// `beforeBuildCommand` would otherwise rebuild here and clobber the signature
+// (plus pay for a second PyInstaller run). SIDECAR_PREBUILT=1 reuses it.
+if (process.env.SIDECAR_PREBUILT === '1' && existsSync(destExe)) {
+	console.log(
+		`[build:sidecar] SIDECAR_PREBUILT=1 and ${destExe} exists — skipping rebuild (preserves signature).`
+	);
+	process.exit(0);
+}
+
 execSync('uv run pyinstaller api_server.spec --noconfirm', {
 	cwd: join(root, 'src-python'),
 	stdio: 'inherit'
@@ -50,9 +63,7 @@ if (!existsSync(builtExe)) {
 	throw new Error(`PyInstaller output missing: ${builtExe}`);
 }
 
-const binDir = join(root, 'src-tauri', 'binaries');
 mkdirSync(binDir, { recursive: true });
-const destExe = join(binDir, `api-server-${triple}${ext}`);
 cpSync(builtExe, destExe);
 console.log(`[build:sidecar] exe -> ${destExe}`);
 

@@ -1,7 +1,12 @@
 <script lang="ts">
 	import { api } from '$lib/api/client';
 	import { backend } from '$lib/api/backend.svelte';
-	import type { FullMessage, UserLogsStats, ChannelLogsStats, PreviousName } from '$lib/api/harambelogs';
+	import type {
+		FullMessage,
+		UserLogsStats,
+		ChannelLogsStats,
+		PreviousName
+	} from '$lib/api/harambelogs';
 	import { Button } from '$lib/components/ui/button/index';
 	import { Input } from '$lib/components/ui/input/index';
 	import { Card, Header, Title, Content } from '$lib/components/ui/card/index';
@@ -73,7 +78,18 @@
 	];
 
 	const needsChannel = $derived(
-		['list', 'stats/channel', 'stats/user', 'search', 'logs/channel', 'logs/user', 'logs/channel/date', 'logs/user/month', 'random/channel', 'random/user'].includes(operation)
+		[
+			'list',
+			'stats/channel',
+			'stats/user',
+			'search',
+			'logs/channel',
+			'logs/user',
+			'logs/channel/date',
+			'logs/user/month',
+			'random/channel',
+			'random/user'
+		].includes(operation)
 	);
 	const needsUser = $derived(
 		['stats/user', 'search', 'logs/user', 'logs/user/month', 'random/user'].includes(operation)
@@ -83,12 +99,18 @@
 		['stats/user', 'stats/channel', 'logs/channel', 'logs/user'].includes(operation)
 	);
 	const needsPagination = $derived(
-		['search', 'logs/channel', 'logs/user', 'logs/channel/date', 'logs/user/month', 'random/channel', 'random/user'].includes(operation)
+		[
+			'search',
+			'logs/channel',
+			'logs/user',
+			'logs/channel/date',
+			'logs/user/month',
+			'random/channel',
+			'random/user'
+		].includes(operation)
 	);
 	const needsUserId = $derived(operation === 'namehistory');
-	const needsDateParts = $derived(
-		['logs/channel/date', 'logs/user/month'].includes(operation)
-	);
+	const needsDateParts = $derived(['logs/channel/date', 'logs/user/month'].includes(operation));
 
 	function clearResults() {
 		error = '';
@@ -100,12 +122,45 @@
 		rawResult = [];
 	}
 
+	/**
+	 * `datetime-local` yields a timezone-less `YYYY-MM-DDTHH:mm`, which the
+	 * upstream API would read as a naive datetime. Interpret it as local time
+	 * and send UTC RFC 3339 (with offset) instead.
+	 */
+	function toRFC3339(value: string): string | undefined {
+		if (!value) return undefined;
+		const d = new Date(value);
+		return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+	}
+
+	/** Client-side required-field checks so empty inputs don't surface as server 422/404s. */
+	function validate(): string | null {
+		if (needsChannel && !channel.trim()) return 'Channel is required for this operation.';
+		if (needsUser && !user.trim()) return 'User is required for this operation.';
+		if (needsQuery && !query.trim()) return 'Search query is required.';
+		if (needsUserId && !userId.trim()) return 'User ID is required.';
+		if (needsDateParts) {
+			if (!year.trim() || !month.trim()) return 'Year and month are required.';
+			if (operation === 'logs/channel/date' && !day.trim()) return 'Day is required.';
+		}
+		return null;
+	}
+
 	async function execute() {
 		clearResults();
 		loading = true;
 
+		const validationError = validate();
+		if (validationError) {
+			error = validationError;
+			loading = false;
+			return;
+		}
+
 		const limitNum = parseInt(limit) || 50;
 		const offsetNum = offset ? parseInt(offset) : undefined;
+		const fromParam = toRFC3339(fromDate);
+		const toParam = toRFC3339(toDate);
 
 		try {
 			switch (operation) {
@@ -131,24 +186,36 @@
 				}
 				case 'stats/user': {
 					const res = await api.harambelogs.getUserStats(
-						channelType, channel, userType, user,
-						fromDate || undefined, toDate || undefined
+						channelType,
+						channel,
+						userType,
+						user,
+						fromParam,
+						toParam
 					);
 					statsUser = res;
 					break;
 				}
 				case 'stats/channel': {
 					const res = await api.harambelogs.getChannelStats(
-						channelType, channel,
-						fromDate || undefined, toDate || undefined
+						channelType,
+						channel,
+						fromParam,
+						toParam
 					);
 					statsChannel = res;
 					break;
 				}
 				case 'search': {
 					const res = await api.harambelogs.search(
-						channelType, channel, userType, user, query,
-						limitNum, offsetNum, reverse
+						channelType,
+						channel,
+						userType,
+						user,
+						query,
+						limitNum,
+						offsetNum,
+						reverse
 					);
 					messages = res.messages;
 					if (messages.length === 0) error = 'No messages found.';
@@ -156,48 +223,73 @@
 				}
 				case 'logs/channel': {
 					const res = await api.harambelogs.getChannelLogs(
-						channelType, channel,
-						fromDate || undefined, toDate || undefined,
-						limitNum, offsetNum, reverse
+						channelType,
+						channel,
+						fromParam,
+						toParam,
+						limitNum,
+						offsetNum,
+						reverse
 					);
 					messages = res.messages;
 					break;
 				}
 				case 'logs/user': {
 					const res = await api.harambelogs.getUserLogs(
-						channelType, channel, userType, user,
-						fromDate || undefined, toDate || undefined,
-						limitNum, offsetNum, reverse
+						channelType,
+						channel,
+						userType,
+						user,
+						fromParam,
+						toParam,
+						limitNum,
+						offsetNum,
+						reverse
 					);
 					messages = res.messages;
 					break;
 				}
 				case 'logs/channel/date': {
 					const res = await api.harambelogs.getChannelLogsByDate(
-						channelType, channel, year, month, day,
-						limitNum, offsetNum, reverse
+						channelType,
+						channel,
+						year,
+						month,
+						day,
+						limitNum,
+						offsetNum,
+						reverse
 					);
 					messages = res.messages;
 					break;
 				}
 				case 'logs/user/month': {
 					const res = await api.harambelogs.getUserLogsByMonth(
-						channelType, channel, userType, user, year, month,
-						limitNum, offsetNum, reverse
+						channelType,
+						channel,
+						userType,
+						user,
+						year,
+						month,
+						limitNum,
+						offsetNum,
+						reverse
 					);
 					messages = res.messages;
 					break;
 				}
 				case 'random/channel': {
-					const res = await api.harambelogs.getChannelRandom(
-						channelType, channel, limitNum
-					);
+					const res = await api.harambelogs.getChannelRandom(channelType, channel, limitNum);
 					messages = res.messages;
 					break;
 				}
 				case 'random/user': {
 					const res = await api.harambelogs.getUserRandom(
-						channelType, channel, userType, user, limitNum
+						channelType,
+						channel,
+						userType,
+						user,
+						limitNum
 					);
 					messages = res.messages;
 					break;
@@ -229,9 +321,9 @@
 				id="hl-operation"
 				bind:value={operation}
 				onchange={() => clearResults()}
-				class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+				class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
 			>
-				{#each operations as op}
+				{#each operations as op (op.value)}
 					<option value={op.value}>{op.label}</option>
 				{/each}
 			</select>
@@ -253,7 +345,7 @@
 					<select
 						id="hl-channel-type"
 						bind:value={channelType}
-						class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+						class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
 					>
 						<option value="channel">channel</option>
 						<option value="channelid">channelid</option>
@@ -273,7 +365,7 @@
 					<select
 						id="hl-user-type"
 						bind:value={userType}
-						class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+						class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
 					>
 						<option value="user">user</option>
 						<option value="userid">userid</option>
@@ -295,7 +387,9 @@
 					bind:value={query}
 					class="mt-1"
 					placeholder="e.g., LULW"
-					onkeydown={(e) => { if (e.key === 'Enter') void execute(); }}
+					onkeydown={(e) => {
+						if (e.key === 'Enter') void execute();
+					}}
 				/>
 			</div>
 		{/if}
@@ -343,10 +437,17 @@
 				</div>
 				<div>
 					<Label for="hl-offset">Offset</Label>
-					<Input id="hl-offset" type="number" min="0" bind:value={offset} class="mt-1" placeholder="0" />
+					<Input
+						id="hl-offset"
+						type="number"
+						min="0"
+						bind:value={offset}
+						class="mt-1"
+						placeholder="0"
+					/>
 				</div>
 				<div class="flex items-end pb-2">
-					<label class="flex items-center gap-2 cursor-pointer text-sm">
+					<label class="flex cursor-pointer items-center gap-2 text-sm">
 						<input
 							type="checkbox"
 							bind:checked={reverse}
@@ -370,7 +471,9 @@
 
 		<!-- Results: Messages -->
 		{#if messages.length > 0}
-			<div class="bg-muted border-border/50 max-h-48 space-y-2 overflow-auto rounded border p-3 text-xs">
+			<div
+				class="bg-muted border-border/50 max-h-48 space-y-2 overflow-auto rounded border p-3 text-xs"
+			>
 				{#each messages as msg (msg.id)}
 					<div class="border-border/30 border-b pb-1 last:border-0">
 						<div class="flex items-baseline justify-between">
@@ -400,7 +503,7 @@
 				<p><strong>Total Messages:</strong> {statsChannel.messageCount.toLocaleString()}</p>
 				{#if statsChannel.topChatters.length > 0}
 					<p class="mt-2 font-semibold">Top Chatters:</p>
-					{#each statsChannel.topChatters.slice(0, 10) as tc}
+					{#each statsChannel.topChatters.slice(0, 10) as tc (tc.userId)}
 						<p class="text-xs">{tc.userLogin ?? tc.userId}: {tc.messageCount.toLocaleString()}</p>
 					{/each}
 				{/if}
@@ -410,9 +513,11 @@
 		<!-- Results: Name History -->
 		{#if nameHistory.length > 0}
 			<div class="bg-muted max-h-48 overflow-auto rounded border p-3 text-sm">
-				{#each nameHistory as nh}
+				{#each nameHistory as nh (nh.user_login + nh.first_timestamp)}
 					<p class="text-xs">
-						{nh.user_login} — {new Date(nh.first_timestamp).toLocaleDateString()} to {new Date(nh.last_timestamp).toLocaleDateString()}
+						{nh.user_login} — {new Date(nh.first_timestamp).toLocaleDateString()} to {new Date(
+							nh.last_timestamp
+						).toLocaleDateString()}
 					</p>
 				{/each}
 			</div>
@@ -421,7 +526,7 @@
 		<!-- Results: Raw string array -->
 		{#if rawResult.length > 0}
 			<div class="bg-muted max-h-48 overflow-auto rounded border p-3 text-xs">
-				{#each rawResult as item}
+				{#each rawResult as item (item)}
 					<p>{item}</p>
 				{/each}
 			</div>

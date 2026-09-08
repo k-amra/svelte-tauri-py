@@ -17,7 +17,6 @@
 		"build:app": "bun run build:sidecar && tauri build",
 		"tauri:dev": "cross-env SIDECAR_DEV=1 tauri dev",
 		"tauri:dev:binary": "tauri dev",
-		"tauri:build": "bun run build:sidecar && tauri build",
 		"preview": "vite preview",
 		"check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
 		"format": "prettier --write .",

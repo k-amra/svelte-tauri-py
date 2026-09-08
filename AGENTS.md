@@ -63,6 +63,9 @@ Rust is ONLY for process lifecycle and native OS access — do not add business 
 - First launch after install extracts to %TEMP% (2–5s cold start); the UI shows backend status meanwhile.
 - Python must never write next to its executable; use `--data-dir` passed by Rust (`app_data_dir()`).
 - Sign the sidecar exe BEFORE `tauri build` (`scripts/sign-sidecar.{ps1,sh}`).
+  Release CI sets `SIDECAR_PREBUILT=1` so `tauri build` reuses the signed
+  binary instead of rebuilding (and clobbering the signature) via
+  `beforeBuildCommand`; `SIGNING_REQUIRED=1` makes signing failures fatal.
 - Never enable UPX in the PyInstaller spec (AV false positives).
 - Bump version in ONE place: `package.json` → synced to `tauri.conf.json` and `pyproject.toml` by `bun run version`.
 - Release = push tag `vX.Y.Z` → CI builds nsis/msi/dmg/deb/rpm/AppImage + `latest.json`.

@@ -39,6 +39,9 @@ fn safe_path(base: &Path, path: &str) -> Result<PathBuf, Error> {
 }
 
 fn read_at(base: &Path, path: &str) -> Result<Vec<u8>, Error> {
+    // safe_path canonicalizes `base`, which fails if the dir doesn't exist
+    // yet (e.g. first launch before the sidecar setup creates it).
+    fs::create_dir_all(base)?;
     Ok(fs::read(safe_path(base, path)?)?)
 }
 
@@ -93,6 +96,18 @@ mod tests {
         write_at(base, "name.txt", unicode.clone()).unwrap();
         let result = String::from_utf8(read_at(base, "name.txt").unwrap()).unwrap();
         assert_eq!(result, unicode);
+    }
+
+    #[test]
+    fn read_creates_missing_base_dir() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path().join("not-yet-created");
+        assert!(!base.exists());
+
+        let result = read_at(&base, "name.txt");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Io(_)));
+        assert!(base.is_dir());
     }
 
     #[test]

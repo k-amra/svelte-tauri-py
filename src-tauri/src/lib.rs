@@ -13,13 +13,14 @@ pub fn run() {
         .manage(SidecarChild(Mutex::new(None)))
         .manage(DevChild(Mutex::new(None)))
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // Always on, including release builds: sidecar spawn/health/
+            // shutdown diagnostics must be visible in production too.
+            // Default targets: stdout + a rotating file in the OS log dir.
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build(),
+            )?;
             sidecar::spawn(app.handle())?;
             Ok(())
         })

@@ -32,6 +32,8 @@ export const apiDebug = {
 			{
 				...entry,
 				id: nextId++,
+				// One-shot timestamp snapshot, not reactive state.
+				// eslint-disable-next-line svelte/prefer-svelte-reactivity
 				timestamp: new Date().toISOString(),
 				payload: preview(entry.payload)
 			}

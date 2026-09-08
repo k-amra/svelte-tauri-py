@@ -38,7 +38,8 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Must match `packageManager` in package.json (lockfile stability).
+          bun-version: '1.4.2'
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
@@ -53,13 +54,16 @@ jobs:
       - name: install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Type check (svelte-check + tsc)
         run: bun run check
 
       - name: Lint (prettier + eslint)
         run: bun run lint
+
+      - name: Lint (ruff)
+        run: bun run lint:python
 
       - name: Frontend unit tests (Vitest)
         run: bun run test:unit

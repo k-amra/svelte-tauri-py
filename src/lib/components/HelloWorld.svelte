@@ -6,9 +6,6 @@
 
 	const gs = new GlobalState();
 
-	// eslint-disable-next-line svelte/no-inspect
-	$inspect(gs.greet, gs.name);
-
 	const handleSubmit = preventDefault(async () => {
 		if (gs.nlen && gs.glen) {
 			await gs.write(FILES.NAME_FILE, gs.name);
@@ -65,12 +62,8 @@
 				/>
 			</div>
 			<div class="flex space-x-4">
-				<Button type="submit" class="flex-1">
-					Save
-				</Button>
-				<Button type="button" variant="outline" onclick={handleReset} class="flex-1">
-					Reset
-				</Button>
+				<Button type="submit" class="flex-1">Save</Button>
+				<Button type="button" variant="outline" onclick={handleReset} class="flex-1">Reset</Button>
 			</div>
 		</form>
 	</Content>

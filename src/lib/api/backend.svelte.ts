@@ -8,7 +8,7 @@ import { listen } from '@tauri-apps/api/event';
 
 let port = $state(0);
 let token = $state('');
-let status = $state<'starting' | 'ready' | 'error'>('starting');
+let status = $state<'starting' | 'ready' | 'error' | 'detached'>('starting');
 let error = $state('');
 let initPromise: Promise<void> | null = null;
 let unlistenBackendReady: (() => void) | null = null;
@@ -44,6 +44,18 @@ async function initializeBackend(runLifecycle: number): Promise<void> {
 		port = envPort;
 		token = envToken;
 		status = 'ready';
+		return;
+	}
+
+	// Plain `vite dev` in a desktop browser has no Tauri IPC: listen()/invoke()
+	// would reject with unhandled promise rejections. Stay detached instead.
+	const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+	if (!inTauri) {
+		port = 0;
+		token = '';
+		status = 'detached';
+		error =
+			'Not running inside Tauri (plain vite dev): set VITE_BACKEND_PORT/VITE_BACKEND_TOKEN to attach a backend.';
 		return;
 	}
 
