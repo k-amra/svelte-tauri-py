@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "tauri2-svelte5-shadcn",
-        "width": 800,
-        "height": 600,
+        "width": 1024,
+        "height": 720,
         "resizable": true,
         "fullscreen": false
       }

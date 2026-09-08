@@ -11,6 +11,7 @@ Rust is ONLY for process lifecycle and native OS access — do not add business 
 
 - `src/lib/api/client.ts` — the only place that calls fetch(). Use it.
 - `src/lib/api/backend.svelte.ts` — `$state` store: port, token, status. Call `backend.init()` once.
+- `src/lib/views.ts` + `src/lib/components/AppNav.svelte` — app shell view registry. Adding a view = one entry (id, label, icon, component).
 - `src/lib/api/types.ts` — generated from FastAPI's OpenAPI schema (`bun run gen:types`).
 - `src-python/app/scripts/` — all Python logic. One file per capability.
 - `src-python/app/routers/` — thin HTTP adapters. No logic here.

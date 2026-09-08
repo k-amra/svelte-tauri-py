@@ -1,10 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { backend } from '$lib/api/backend.svelte';
-	import HelloWorld from '$lib/components/HelloWorld.svelte';
-	import HarambelogsPanel from '$lib/components/HarambelogsPanel.svelte';
-	import ScriptsPanel from '$lib/components/ScriptsPanel.svelte';
-	import ChatStatsPanel from '$lib/components/ChatStatsPanel.svelte';
+	import AppNav from '$lib/components/AppNav.svelte';
+	import { DEFAULT_VIEW, views } from '$lib/views';
 
 	// App owns the global backend lifecycle (init once, dispose on unmount).
 	onMount(() => {
@@ -13,13 +11,16 @@
 			void backend.dispose();
 		};
 	});
+
+	let activeId = $state(DEFAULT_VIEW);
+	const activeView = $derived(views.find((v) => v.id === activeId) ?? views[0]);
 </script>
 
-<main
-	class="bg-background flex min-h-screen flex-wrap items-center justify-center gap-6 p-4 select-none"
->
-	<HelloWorld />
-	<ScriptsPanel />
-	<HarambelogsPanel />
-	<ChatStatsPanel />
-</main>
+<div class="bg-background text-foreground flex h-screen select-none">
+	<AppNav {views} bind:activeId />
+	<main class="flex-1 overflow-y-auto">
+		<div class="mx-auto flex max-w-5xl justify-center p-6">
+			<activeView.component />
+		</div>
+	</main>
+</div>
