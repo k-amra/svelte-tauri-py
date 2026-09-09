@@ -35,6 +35,13 @@ const fakeStats: ChatStatsResult = {
 	top_emotes: [{ name: 'Kappa', count: 15 }]
 };
 
+async function fillDates() {
+	const from = document.getElementById('cs-from') as HTMLInputElement;
+	const to = document.getElementById('cs-to') as HTMLInputElement;
+	await fireEvent.input(from, { target: { value: '2024-01-01T10:00' } });
+	await fireEvent.input(to, { target: { value: '2024-01-02T10:00' } });
+}
+
 function doneJob(): JobStatus {
 	return {
 		job_id: 'abc123',
@@ -93,6 +100,7 @@ describe('ChatStatsPanel', () => {
 		});
 
 		render(ChatStatsPanel);
+		await fillDates();
 		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
 
 		await waitFor(() => {
@@ -127,6 +135,7 @@ describe('ChatStatsPanel', () => {
 		mockWaitJob.mockResolvedValueOnce(cached);
 
 		render(ChatStatsPanel);
+		await fillDates();
 		await fireEvent.click(screen.getByText('Bypass cache (re-download)'));
 		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
 
@@ -149,6 +158,16 @@ describe('ChatStatsPanel', () => {
 
 		await waitFor(() => {
 			expect(screen.getByText('Channel is required.')).toBeInTheDocument();
+		});
+		expect(mockCreateJob).not.toHaveBeenCalled();
+	});
+
+	it('requires both dates (upstream rejects open ranges)', async () => {
+		render(ChatStatsPanel);
+		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
+
+		await waitFor(() => {
+			expect(screen.getByText('Both from and to dates are required.')).toBeInTheDocument();
 		});
 		expect(mockCreateJob).not.toHaveBeenCalled();
 	});
