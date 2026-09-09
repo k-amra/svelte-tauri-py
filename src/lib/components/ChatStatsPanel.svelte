@@ -29,7 +29,9 @@
 
 	function validate(): string | null {
 		if (!channel.trim()) return 'Channel is required.';
-		if (fromDate && toDate && new Date(fromDate).getTime() >= new Date(toDate).getTime()) {
+		// Upstream 303-redirects unbounded log requests, so a date range is mandatory.
+		if (!fromDate || !toDate) return 'Both from and to dates are required.';
+		if (new Date(fromDate).getTime() >= new Date(toDate).getTime()) {
 			return 'The from-date must be before the to-date.';
 		}
 		if (!Number.isInteger(topN) || topN < 5 || topN > 100) {
