@@ -168,6 +168,17 @@ def test_fetch_uses_24h_disk_cache(monkeypatch):
     assert calls == []
 
 
+def test_run_rejects_inverted_range():
+    with pytest.raises(ValueError, match="before to_date"):
+        chat_stats.run(
+            chat_stats.Params(
+                channel="chan",
+                from_date=datetime(2024, 1, 2, tzinfo=UTC),
+                to_date=datetime(2024, 1, 1, tzinfo=UTC),
+            )
+        )
+
+
 def test_run_includes_top_emotes_and_twitch_id(monkeypatch):
     async def fake_fetch(params, progress):
         return [tagged_msg("a", "Kappa Kappa", "25:0-4,6-10")], False
@@ -179,7 +190,13 @@ def test_run_includes_top_emotes_and_twitch_id(monkeypatch):
 
     monkeypatch.setattr(chat_stats, "_fetch_all", fake_fetch)
     monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
-    result = chat_stats.run(chat_stats.Params(channel="chan"))
+    result = chat_stats.run(
+        chat_stats.Params(
+            channel="chan",
+            from_date=datetime(2024, 1, 1, tzinfo=UTC),
+            to_date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+    )
     assert result.top_emotes == [chat_stats.EmoteCount(name="Kappa", count=2)]
     assert result.from_cache is False
     # Native emote names must not leak into the vocabulary stats.

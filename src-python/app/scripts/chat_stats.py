@@ -60,8 +60,10 @@ STOPWORDS = frozenset(
 class Params(BaseModel):
     channel: str
     channel_id_type: Literal["channel", "channelid"] = "channel"
-    from_date: datetime | None = None
-    to_date: datetime | None = None
+    # Both required: upstream 303-redirects any unbounded channel-logs
+    # request, so an open-ended fetch can never succeed.
+    from_date: datetime
+    to_date: datetime
     top_n: int = Field(20, ge=5, le=100)
     force_refresh: bool = False  # bypass the cache and re-download
 
@@ -114,19 +116,20 @@ def _parse_ts(value: datetime | str) -> datetime | None:
 
 
 def messages_to_frame(messages: list[FullMessage]) -> pl.DataFrame:
-    """Convert fetched messages to a polars frame (username/text/ts/emotes_tag).
+    """Convert fetched messages to a polars frame (username/text/ts/emotes_tag/id).
 
     The raw `emotes` IRC tag is preserved so emote counting keeps working
-    on frames loaded back from the parquet disk cache. Rows with unparsable
-    timestamps are dropped — they cannot be placed in time, and every
-    downstream stat is time-based.
+    on frames loaded back from the parquet disk cache; the upstream message
+    `id` is preserved so incremental cache top-ups can dedupe the overlap
+    window exactly. Rows with unparsable timestamps are dropped — they
+    cannot be placed in time, and every downstream stat is time-based.
     """
-    rows: list[tuple[str, str, datetime, str | None]] = []
+    rows: list[tuple[str, str, datetime, str | None, str]] = []
     for m in messages:
         ts = _parse_ts(m.timestamp)
         if ts is not None:
             emotes_tag = m.tags.get("emotes") if m.tags else None
-            rows.append((m.username, m.text, ts, str(emotes_tag) if emotes_tag else None))
+            rows.append((m.username, m.text, ts, str(emotes_tag) if emotes_tag else None, m.id))
     if not rows:
         return pl.DataFrame(
             {
@@ -134,15 +137,17 @@ def messages_to_frame(messages: list[FullMessage]) -> pl.DataFrame:
                 "text": pl.Series([], dtype=pl.String),
                 "ts": pl.Series([], dtype=pl.Datetime(time_unit="us", time_zone="UTC")),
                 "emotes_tag": pl.Series([], dtype=pl.String),
+                "id": pl.Series([], dtype=pl.String),
             }
         )
-    usernames, texts, stamps, emotes = zip(*rows, strict=True)
+    usernames, texts, stamps, emotes, ids = zip(*rows, strict=True)
     return pl.DataFrame(
         {
             "username": list(usernames),
             "text": list(texts),
             "ts": pl.Series(list(stamps), dtype=pl.Datetime(time_unit="us", time_zone="UTC")),
             "emotes_tag": list(emotes),
+            "id": list(ids),
         }
     )
 
@@ -354,76 +359,155 @@ async def _fetch_all(
         )
 
 
-def run(
-    params: Params, progress: Callable[[float, str], None] = lambda pct, msg="": None
+def _to_timestamp(dt: datetime | None) -> float | None:
+    """Epoch seconds for aware or naive datetimes; None for open end."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
+
+
+def _build_stats(df: pl.DataFrame, emote_map: dict[str, str], top_n: int) -> dict:
+    """Analyze a frame: emote names double as vocabulary exclusions."""
+    top_emotes = _count_emotes_from_frame(df, emote_map)
+    stats = compute_stats(
+        df,
+        top_n,
+        emote_map,
+        frozenset(e["name"].lower() for e in top_emotes),
+    )
+    stats["top_emotes"] = top_emotes
+    return stats
+
+
+def _extract_twitch_id(messages: list[FullMessage]) -> str | None:
+    for m in messages:
+        if m.tags and "room-id" in m.tags:
+            return str(m.tags["room-id"])
+    return None
+
+
+def _cache_meta(params: Params, df: pl.DataFrame, truncated: bool, twitch_id: str | None) -> dict:
+    return {
+        "channel": params.channel,
+        "channel_id_type": params.channel_id_type,
+        "from": params.from_date.isoformat() if params.from_date else None,
+        "to": params.to_date.isoformat() if params.to_date else None,
+        "fetched_at": datetime.now(UTC).timestamp(),
+        "immutable": log_cache.is_immutable_range(params.from_date, params.to_date),
+        "truncated": truncated,
+        "message_count": df.height,
+        "twitch_id": twitch_id,
+    }
+
+
+def _run_fresh(
+    params: Params, fp: str, progress: Callable[[float, str], None]
 ) -> Result:
-    fp = log_cache.fingerprint(params.channel_id_type, params.channel, params.from_date, params.to_date)
-
-    cached = None if params.force_refresh else log_cache.load(fp)
-    if cached is not None:
-        df, meta = cached
-        progress(80.0, f"cache hit: {meta.get('message_count', df.height)} messages")
-
-        # Emote catalog is tiny and cached 24h separately — refresh it even
-        # on a frame cache hit, using the stored Twitch user id.
-        twitch_id = meta.get("twitch_id")
-        emote_map = asyncio.run(fetch_channel_emotes(params.channel, twitch_id))
-
-        top_emotes = _count_emotes_from_frame(df, emote_map)
-        stats = compute_stats(
-            df,
-            params.top_n,
-            emote_map,
-            frozenset(e["name"].lower() for e in top_emotes),
-        )
-        stats["top_emotes"] = top_emotes
-        stats["truncated"] = bool(meta.get("truncated", False))
-        stats["from_cache"] = True
-        fetched_at = meta.get("fetched_at")
-        stats["cached_at"] = datetime.fromtimestamp(fetched_at, UTC).isoformat() if fetched_at else None
-        progress(100.0, "done (cached)")
-        return Result(**stats)
-
     progress(2.0, "connecting")
     # Scripts run in worker threads (jobs API / FastAPI threadpool), so
     # bridging the async fetcher with asyncio.run() is safe here.
     messages, truncated = asyncio.run(_fetch_all(params, progress))
 
     progress(80.0, "fetching emotes")
-    twitch_id = None
-    for m in messages:
-        if m.tags and "room-id" in m.tags:
-            twitch_id = str(m.tags["room-id"])
-            break
-
+    twitch_id = _extract_twitch_id(messages)
     emote_map = asyncio.run(fetch_channel_emotes(params.channel, twitch_id))
 
     progress(82.0, "building dataframe")
     df = messages_to_frame(messages)
+    log_cache.save(fp, df, _cache_meta(params, df, truncated, twitch_id))
 
-    log_cache.save(
-        fp,
-        df,
-        {
-            "channel": params.channel,
-            "channel_id_type": params.channel_id_type,
-            "from": params.from_date.isoformat() if params.from_date else None,
-            "to": params.to_date.isoformat() if params.to_date else None,
-            "fetched_at": datetime.now(UTC).timestamp(),
-            "immutable": log_cache.is_immutable_range(params.from_date, params.to_date),
-            "truncated": truncated,
-            "message_count": df.height,
-            "twitch_id": twitch_id,
-        },
-    )
-    top_emotes = _count_emotes_from_frame(df, emote_map)
-    stats = compute_stats(
-        df,
-        params.top_n,
-        emote_map,
-        frozenset(e["name"].lower() for e in top_emotes),
-    )
-    stats["top_emotes"] = top_emotes
+    stats = _build_stats(df, emote_map, params.top_n)
     stats["truncated"] = truncated
     progress(100.0, "done")
     return Result(**stats)
+
+
+def _run_top_up(
+    params: Params,
+    fp: str,
+    stale: tuple[pl.DataFrame, dict],
+    progress: Callable[[float, str], None],
+) -> Result:
+    """Refresh an expired entry by downloading only the delta.
+
+    Fetches [previous fetched_at → requested end] and merges with the
+    cached frame, deduping on the upstream message id. The requested range
+    is identical (same fingerprint), so the union is exactly the range.
+    """
+    old_df, old_meta = stale
+    fetched_at = float(old_meta.get("fetched_at", 0.0))
+    since = datetime.fromtimestamp(fetched_at, UTC)
+    to_ts = _to_timestamp(params.to_date)
+
+    if to_ts is not None and fetched_at >= to_ts:
+        # Everything up to `to` was already fetched: nothing new to get.
+        progress(80.0, f"cache hit: {old_df.height} messages")
+        emote_map = asyncio.run(fetch_channel_emotes(params.channel, old_meta.get("twitch_id")))
+        stats = _build_stats(old_df, emote_map, params.top_n)
+        stats["truncated"] = bool(old_meta.get("truncated", False))
+        stats["from_cache"] = True
+        stats["cached_at"] = since.isoformat()
+        progress(100.0, "done (cached)")
+        return Result(**stats)
+
+    progress(2.0, f"updating cache since {since.isoformat()}")
+    delta_params = params.model_copy(update={"from_date": since})
+    messages, delta_truncated = asyncio.run(_fetch_all(delta_params, progress))
+
+    progress(82.0, "merging with cache")
+    new_df = messages_to_frame(messages)
+    if "id" in old_df.columns:
+        df = pl.concat([old_df, new_df], how="vertical").unique(
+            subset=["id"], keep="last", maintain_order=True
+        )
+    else:  # pragma: no cover - pre-id frames can't occur under v2+
+        df = pl.concat([old_df, new_df], how="diagonal")
+    df = df.sort("ts")
+
+    twitch_id = old_meta.get("twitch_id") or _extract_twitch_id(messages)
+    emote_map = asyncio.run(fetch_channel_emotes(params.channel, twitch_id))
+    log_cache.save(
+        fp, df, _cache_meta(params, df, bool(old_meta.get("truncated", False)) or delta_truncated, twitch_id)
+    )
+
+    stats = _build_stats(df, emote_map, params.top_n)
+    stats["truncated"] = bool(old_meta.get("truncated", False)) or delta_truncated
+    progress(100.0, "done")
+    return Result(**stats)
+
+
+def run(
+    params: Params, progress: Callable[[float, str], None] = lambda pct, msg="": None
+) -> Result:
+    start_ts = _to_timestamp(params.from_date)
+    end_ts = _to_timestamp(params.to_date)
+    if start_ts is not None and end_ts is not None and start_ts >= end_ts:
+        raise ValueError("from_date must be before to_date")
+    fp = log_cache.fingerprint(params.channel_id_type, params.channel, params.from_date, params.to_date)
+
+    if not params.force_refresh:
+        cached = log_cache.load(fp)
+        if cached is not None:
+            df, meta = cached
+            progress(80.0, f"cache hit: {meta.get('message_count', df.height)} messages")
+
+            # Emote catalog is tiny and cached 24h separately — refresh it even
+            # on a frame cache hit, using the stored Twitch user id.
+            twitch_id = meta.get("twitch_id")
+            emote_map = asyncio.run(fetch_channel_emotes(params.channel, twitch_id))
+
+            stats = _build_stats(df, emote_map, params.top_n)
+            stats["truncated"] = bool(meta.get("truncated", False))
+            stats["from_cache"] = True
+            fetched_at = meta.get("fetched_at")
+            stats["cached_at"] = datetime.fromtimestamp(fetched_at, UTC).isoformat() if fetched_at else None
+            progress(100.0, "done (cached)")
+            return Result(**stats)
+
+        stale = log_cache.load(fp, allow_stale=True)
+        if stale is not None:
+            return _run_top_up(params, fp, stale, progress)
+
+    return _run_fresh(params, fp, progress)

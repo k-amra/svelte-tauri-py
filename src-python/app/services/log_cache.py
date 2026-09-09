@@ -15,7 +15,8 @@ Validity rules:
 
 Layout:
     <data-dir>/cache/chat_stats/v1/<fingerprint>.parquet   (username/text/ts)
-    <data-dir>/cache/chat_stats/v1/<fingerprint>.json      (fetch metadata)
+    <data-dir>/cache/chat_stats/v2/<fingerprint>.parquet   (username/text/ts/emotes_tag/id)
+    <data-dir>/cache/chat_stats/v2/<fingerprint>.json      (fetch metadata)
 
 Only the columns compute_stats needs are cached (drops raw/tags/...), which
 keeps files small. Bump CACHE_VERSION if the cached schema ever changes.
@@ -27,6 +28,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,15 +39,23 @@ from app.core import paths
 
 log = logging.getLogger(__name__)
 
-CACHE_VERSION = "v1"
+CACHE_VERSION = "v2"
 LIVE_TTL_S = 15 * 60  # ranges that touch "now" expire after this
 IMMUTABLE_MARGIN_S = 60 * 60  # ranges ending this far in the past are immutable
 MAX_CACHE_BYTES = 500 * 1024 * 1024  # evict oldest entries above this
 
 
 def _dir() -> Path:
-    d = paths.cache_root() / "chat_stats" / CACHE_VERSION
+    root = paths.cache_root() / "chat_stats"
+    root.mkdir(parents=True, exist_ok=True)
+    d = root / CACHE_VERSION
     d.mkdir(parents=True, exist_ok=True)
+    # Drop caches written by older app versions (different frame schema):
+    # without this each version could hoard up to MAX_CACHE_BYTES forever.
+    for child in root.iterdir():
+        if child.is_dir() and child.name != CACHE_VERSION:
+            shutil.rmtree(child, ignore_errors=True)
+            log.info("cache cleanup: removed outdated version dir %s", child.name)
     return d
 
 
@@ -98,8 +108,13 @@ def _range_now_immutable(meta: dict) -> bool:
     return is_immutable_range(None, to_date)
 
 
-def load(fp: str) -> tuple[pl.DataFrame, dict] | None:
-    """Return (frame, metadata) on a valid cache hit, else None."""
+def load(fp: str, *, allow_stale: bool = False) -> tuple[pl.DataFrame, dict] | None:
+    """Return (frame, metadata) on a valid cache hit, else None.
+
+    With `allow_stale=True`, expired live entries are returned too, so the
+    caller can top them up incrementally instead of re-downloading.
+    Missing/corrupt entries still return None.
+    """
     base = _dir() / fp
     meta_path = base.with_suffix(".json")
     parquet_path = base.with_suffix(".parquet")
@@ -111,7 +126,11 @@ def load(fp: str) -> tuple[pl.DataFrame, dict] | None:
         return None
     if not meta.get("immutable") and _range_now_immutable(meta):
         meta["immutable"] = True
-    if not meta.get("immutable") and (time.time() - meta.get("fetched_at", 0.0)) >= LIVE_TTL_S:
+    if (
+        not allow_stale
+        and not meta.get("immutable")
+        and (time.time() - meta.get("fetched_at", 0.0)) >= LIVE_TTL_S
+    ):
         return None
     try:
         return pl.read_parquet(parquet_path), meta
