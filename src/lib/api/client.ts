@@ -65,6 +65,58 @@ async function apiFetch(path: string, init: RequestInit = {}, skipAuth = false) 
 	return res.json();
 }
 
+interface SSEMessage {
+	event: string;
+	data: string;
+}
+
+/**
+ * Minimal SSE reader over fetch() streaming.
+ *
+ * EventSource cannot send an Authorization header, and the jobs endpoints
+ * are bearer-gated, so we read the stream ourselves. Frames are separated
+ * by a blank line; fields we care about are `event:` and `data:`.
+ */
+async function* readSSE(
+	url: string,
+	init: RequestInit,
+	signal?: AbortSignal
+): AsyncGenerator<SSEMessage> {
+	const res = await fetch(url, { ...init, signal });
+	if (!res.ok) {
+		const text = await res.text().catch(() => '');
+		throw new Error(`SSE ${res.status} ${url}: ${text}`);
+	}
+	if (!res.body) throw new Error(`SSE ${url}: no response body`);
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let buf = '';
+
+	try {
+		while (true) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			buf += decoder.decode(value, { stream: true });
+
+			let sep: number;
+			while ((sep = buf.indexOf('\n\n')) >= 0) {
+				const frame = buf.slice(0, sep);
+				buf = buf.slice(sep + 2);
+				let event = 'message';
+				let data = '';
+				for (const line of frame.split('\n')) {
+					if (line.startsWith('event:')) event = line.slice(6).trim();
+					else if (line.startsWith('data:')) data += line.slice(5);
+				}
+				if (event || data) yield { event, data };
+			}
+		}
+	} finally {
+		reader.releaseLock();
+	}
+}
+
 export const api = {
 	health(): Promise<{ status: string }> {
 		return apiFetch('/health', {}, true);
@@ -92,20 +144,64 @@ export const api = {
 		return apiFetch(`/api/jobs/${jobId}`);
 	},
 
-	/** Poll GET /api/jobs/{id} until done/error (simple; use SSE endpoint for live logs). */
+	/**
+	 * Stream job progress via SSE until done/error. Same signature as the
+	 * old polling implementation so callers don't change.
+	 *
+	 * The server emits one `data:` frame per progress event
+	 * ({seq, progress, message, t}) and a final `event: done|error` frame
+	 * carrying the full JobStatus snapshot.
+	 */
 	async waitJob(
 		jobId: string,
 		onProgress?: (j: JobStatus) => void,
 		timeoutMs = 600_000
 	): Promise<JobStatus> {
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
-			const j = await api.getJob(jobId);
-			onProgress?.(j);
-			if (j.status === 'done' || j.status === 'error') return j;
-			await new Promise((r) => setTimeout(r, 200));
+		const url = `${backend.base}/api/jobs/${jobId}/events`;
+
+		const ctrl = new AbortController();
+		const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+
+		// Seed so a UI that starts mid-stream still sees a status object.
+		const seed = await api.getJob(jobId);
+		onProgress?.(seed);
+
+		try {
+			try {
+				for await (const msg of readSSE(url, { headers: backend.headers }, ctrl.signal)) {
+					if (msg.event === 'done' || msg.event === 'error') {
+						return JSON.parse(msg.data) as JobStatus;
+					}
+					if (msg.event === 'message' && msg.data) {
+						// Progress frame: only the fields the UI needs.
+						const ev = JSON.parse(msg.data) as {
+							seq: number;
+							progress: number;
+							message: string;
+						};
+						onProgress?.({
+							...seed,
+							progress: ev.progress,
+							message: ev.message
+						});
+					}
+				}
+			} catch (e) {
+				// Timeout abort must keep the old polling contract (Error with
+				// the job id), not leak a DOM AbortError to callers.
+				if (ctrl.signal.aborted) {
+					throw new Error(`job ${jobId} timed out after ${timeoutMs}ms`, { cause: e });
+				}
+				throw new Error(`job ${jobId} stream failed: ${e instanceof Error ? e.message : String(e)}`, {
+					cause: e
+				});
+			}
+			// Stream ended without a terminal event; fall through to a
+			// final poll so a lost terminal frame isn't fatal.
+			return await api.getJob(jobId);
+		} finally {
+			clearTimeout(timer);
 		}
-		throw new Error(`job ${jobId} timed out after ${timeoutMs}ms`);
 	},
 
 	harambelogs: {

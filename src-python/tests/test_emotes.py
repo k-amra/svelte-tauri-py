@@ -17,6 +17,16 @@ def _data_dir(tmp_path):
     paths.init(str(tmp_path))
 
 
+@pytest.fixture(autouse=True)
+def _no_calendar(monkeypatch):
+    """Keep run() tests offline: no /list probe."""
+
+    async def _none(api, channel_id_type, channel):
+        return None
+
+    monkeypatch.setattr(chat_stats, "channel_log_days", _none)
+
+
 def tagged_msg(username: str, text: str, emotes_tag: str | None) -> FullMessage:
     tags: dict = {"room-id": "12345"}
     if emotes_tag is not None:
@@ -191,7 +201,10 @@ def test_run_rejects_inverted_range():
 
 
 def test_run_includes_top_emotes_and_twitch_id(monkeypatch):
-    async def fake_fetch(params, progress):
+    seen: list = []
+
+    async def fake_fetch(api, channel_id_type, channel, from_date, to_date, **kwargs):
+        seen.append((from_date, to_date))
         return [tagged_msg("a", "Kappa Kappa", "25:0-4,6-10")], False
 
     async def fake_emotes(channel_name, user_id):
@@ -199,16 +212,18 @@ def test_run_includes_top_emotes_and_twitch_id(monkeypatch):
         assert user_id == "12345"  # extracted from the room-id tag
         return {"25": "Kappa"}
 
-    monkeypatch.setattr(chat_stats, "_fetch_all", fake_fetch)
+    monkeypatch.setattr(chat_stats, "fetch_channel_logs", fake_fetch)
     monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
     result = chat_stats.run(
         chat_stats.Params(
             channel="chan",
-            from_date=datetime(2024, 1, 1, tzinfo=UTC),
-            to_date=datetime(2024, 1, 2, tzinfo=UTC),
+            from_date=datetime(2024, 1, 15, tzinfo=UTC),
+            to_date=datetime(2024, 1, 16, tzinfo=UTC),
         )
     )
     assert result.top_emotes == [chat_stats.EmoteCount(name="Kappa", count=2)]
     assert result.from_cache is False
+    # Single month in range: exactly one span fetch.
+    assert len(seen) == 1
     # Native emote names must not leak into the vocabulary stats.
     assert all(w.word != "kappa" for w in result.top_words)

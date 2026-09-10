@@ -48,7 +48,7 @@ async def job_events(job_id: str):
     from app.core.jobs import jobs
 
     async def gen():
-        seen = 0
+        seen = -1  # start before the first event (seq starts at 0)
         while True:
             batch = jobs.events_since(job_id, seen)
             if batch is None:
@@ -57,7 +57,7 @@ async def job_events(job_id: str):
             events, status, snapshot = batch
             for ev in events:
                 yield f"data: {json.dumps(ev)}\n\n"
-                seen += 1
+                seen = ev["seq"]
             if status in ("done", "error"):
                 yield f"event: {status}\ndata: {json.dumps(snapshot)}\n\n"
                 return

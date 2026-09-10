@@ -3,7 +3,7 @@
  * (src-python/app/scripts/chat_stats.py). `types.ts` stays the generated
  * placeholder; this file tracks the one capability with a rich result shape.
  *
- * Keep in sync with Params/Result in chat_stats.py (v4.2).
+ * Keep in sync with Params/Result in chat_stats.py (v4.5).
  */
 export interface TopChatterStat {
 	user_id: string;
@@ -210,6 +210,7 @@ export interface ChatStatsParams {
 	session_gap_minutes: number;
 	anomaly_sigma: number;
 	force_refresh: boolean;
+	max_range_days: number;
 }
 
 export const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];

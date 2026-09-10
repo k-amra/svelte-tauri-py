@@ -1,7 +1,7 @@
-"""Tests for the on-disk parquet cache (tmp dir, no network)."""
+"""Tests for the monthly-chunked parquet cache (tmp dir, no network)."""
 
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import polars as pl
 import pytest
@@ -25,76 +25,107 @@ def _frame() -> pl.DataFrame:
     )
 
 
-def test_fingerprint_is_channel_case_insensitive():
-    assert log_cache.fingerprint("channel", "Demonzz1", None, None) == log_cache.fingerprint(
-        "channel", "demonzz1", None, None
+def _meta(**overrides) -> dict:
+    base = {
+        "channel": "x",
+        "channel_id_type": "channel",
+        "year": 2024,
+        "month": 1,
+        "fetched_at": time.time(),
+        "immutable": True,
+        "truncated": False,
+        "covered_from": "2024-01-01T00:00:00+00:00",
+        "covered_to": "2024-02-01T00:00:00+00:00",
+        "complete": True,
+        "message_count": 2,
+        "twitch_id": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_month_bounds_roll_over_december():
+    start, end = log_cache.month_bounds(2024, 12)
+    assert (start.year, start.month, start.day) == (2024, 12, 1)
+    assert (end.year, end.month, end.day) == (2025, 1, 1)
+    assert log_cache.month_key(2024, 1) == "2024_01"
+
+
+def test_channel_dir_is_case_insensitive():
+    assert log_cache.get_month_paths("channel", "Demonzz1", 2024, 1) == log_cache.get_month_paths(
+        "channel", "demonzz1", 2024, 1
     )
 
 
 def test_save_load_roundtrip():
-    fp = log_cache.fingerprint("channel", "x", None, None)
-    log_cache.save(fp, _frame(), {"fetched_at": time.time(), "immutable": True})
-    hit = log_cache.load(fp)
+    log_cache.save_month("channel", "x", 2024, 1, _frame(), _meta())
+    hit = log_cache.load_month("channel", "x", 2024, 1)
     assert hit is not None
     df, meta = hit
     assert df.height == 2
     assert meta["immutable"] is True
+    assert meta["covered_from"] == "2024-01-01T00:00:00+00:00"
 
 
-def test_expired_live_entry_is_not_returned():
-    fp = log_cache.fingerprint("channel", "x", None, None)
-    log_cache.save(fp, _frame(), {"fetched_at": time.time() - 2 * log_cache.LIVE_TTL_S, "immutable": False})
-    assert log_cache.load(fp) is None
+def test_missing_month_returns_none():
+    assert log_cache.load_month("channel", "x", 2024, 3) is None
 
 
-def test_immutable_entry_never_expires():
-    fp = log_cache.fingerprint("channel", "x", None, None)
-    log_cache.save(fp, _frame(), {"fetched_at": 0.0, "immutable": True})
-    assert log_cache.load(fp) is not None
-
-
-def test_eviction_enforces_cap(monkeypatch):
-    monkeypatch.setattr(log_cache, "MAX_CACHE_BYTES", 0)
-    fp = log_cache.fingerprint("channel", "evictme", None, None)
-    log_cache.save(fp, _frame(), {"fetched_at": time.time(), "immutable": True})
-    assert log_cache.load(fp) is None
-
-
-def test_live_entry_promotes_to_immutable_once_to_ages_past():
-    fp = log_cache.fingerprint("channel", "promo", None, None)
-    old_to = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-    log_cache.save(
-        fp,
+def test_old_flag_promotes_once_month_ages_past():
+    log_cache.save_month(
+        "channel",
+        "x",
+        2024,
+        1,
         _frame(),
-        {"fetched_at": time.time() - 2 * log_cache.LIVE_TTL_S, "immutable": False, "to": old_to},
+        _meta(immutable=False, fetched_at=time.time() - 2 * log_cache.LIVE_TTL_S),
     )
-    hit = log_cache.load(fp)
+    # January 2024 is long past: promotes to immutable despite the old flag.
+    hit = log_cache.load_month("channel", "x", 2024, 1)
     assert hit is not None
     assert hit[1]["immutable"] is True
 
 
-def test_open_ended_entry_never_promotes():
-    fp = log_cache.fingerprint("channel", "openended", None, None)
-    log_cache.save(
-        fp,
+def test_expired_current_month_is_not_returned_without_stale():
+    now = datetime.now(UTC)
+    log_cache.save_month(
+        "channel",
+        "x",
+        now.year,
+        now.month,
         _frame(),
-        {"fetched_at": time.time() - 2 * log_cache.LIVE_TTL_S, "immutable": False, "to": None},
+        _meta(immutable=False, fetched_at=time.time() - 2 * log_cache.LIVE_TTL_S),
     )
-    assert log_cache.load(fp) is None
+    assert log_cache.load_month("channel", "x", now.year, now.month) is None
+    stale = log_cache.load_month("channel", "x", now.year, now.month, allow_stale=True)
+    assert stale is not None
 
 
-def test_malformed_to_never_promotes():
-    fp = log_cache.fingerprint("channel", "badto", None, None)
-    log_cache.save(
-        fp,
-        _frame(),
-        {"fetched_at": time.time() - 2 * log_cache.LIVE_TTL_S, "immutable": False, "to": "not-a-date"},
-    )
-    assert log_cache.load(fp) is None
+def test_immutable_month_never_expires():
+    log_cache.save_month("channel", "x", 2024, 1, _frame(), _meta(fetched_at=0.0))
+    assert log_cache.load_month("channel", "x", 2024, 1) is not None
 
 
-def test_range_immutable_only_when_safely_in_the_past():
-    past = datetime.now(UTC) - timedelta(days=1)
-    assert log_cache.is_immutable_range(None, past) is True
-    assert log_cache.is_immutable_range(None, None) is False
-    assert log_cache.is_immutable_range(None, datetime.now(UTC)) is False
+def test_is_month_immutable():
+    assert log_cache.is_month_immutable(2020, 5) is True
+    now = datetime.now(UTC)
+    assert log_cache.is_month_immutable(now.year, now.month) is False
+
+
+def test_eviction_enforces_cap_across_channels(monkeypatch):
+    monkeypatch.setattr(log_cache, "MAX_CACHE_BYTES", 0)
+    monkeypatch.setattr(log_cache, "_last_evict_ts", 0.0)
+    log_cache.save_month("channel", "evictme", 2024, 1, _frame(), _meta())
+    assert log_cache.load_month("channel", "evictme", 2024, 1) is None
+
+
+def test_eviction_throttled_within_interval(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(log_cache, "_last_evict_ts", 0.0)
+    monkeypatch.setattr(log_cache, "_evict_if_needed", lambda: calls.append(1))
+    log_cache.save_month("channel", "a", 2024, 1, _frame(), _meta())
+    log_cache.save_month("channel", "b", 2024, 1, _frame(), _meta())
+    assert len(calls) == 1  # second save skips the sweep
+    monkeypatch.setattr(log_cache, "_last_evict_ts", 0.0)
+    log_cache.save_month("channel", "c", 2024, 1, _frame(), _meta())
+    assert len(calls) == 2

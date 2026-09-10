@@ -188,6 +188,81 @@ describe('ChatStatsPanel', () => {
 		expect(screen.getByText(/Top commands/)).toBeInTheDocument();
 	});
 
+	it('labels the download phase in plain language', async () => {
+		mockCreateJob.mockResolvedValueOnce({
+			job_id: 'abc123',
+			script: 'chat_stats',
+			status: 'running',
+			progress: 0,
+			message: '',
+			result: null,
+			error: null
+		});
+		let seen: JobStatus | null = null;
+		mockWaitJob.mockImplementationOnce(async (_id, onProgress) => {
+			const running: JobStatus = {
+				job_id: 'abc123',
+				script: 'chat_stats',
+				status: 'running',
+				progress: 30,
+				message: 'fetched 100 messages (page 2)',
+				result: null,
+				error: null
+			};
+			seen = running;
+			onProgress?.(running);
+			// Keep the job "running" so the phase stays visible for the assertion.
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			return doneJob();
+		});
+
+		render(ChatStatsPanel);
+		await fillDates();
+		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
+
+		await waitFor(() => {
+			expect(screen.getByTestId('cs-phase')).toHaveTextContent('Downloading chat logs…');
+		});
+		expect(screen.getByTestId('cs-phase-detail')).toHaveTextContent(
+			'fetched 100 messages (page 2)'
+		);
+		expect(seen).not.toBeNull();
+	});
+
+	it('labels a month download as a download, not a redownload', async () => {
+		mockCreateJob.mockResolvedValueOnce({
+			job_id: 'abc123',
+			script: 'chat_stats',
+			status: 'running',
+			progress: 0,
+			message: '',
+			result: null,
+			error: null
+		});
+		mockWaitJob.mockImplementationOnce(async (_id, onProgress) => {
+			onProgress?.({
+				job_id: 'abc123',
+				script: 'chat_stats',
+				status: 'running',
+				progress: 2,
+				message: 'downloading 2024-09…',
+				result: null,
+				error: null
+			});
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			return doneJob();
+		});
+
+		render(ChatStatsPanel);
+		await fillDates();
+		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
+
+		await waitFor(() => {
+			expect(screen.getByTestId('cs-phase')).toHaveTextContent('Downloading chat logs…');
+		});
+		expect(screen.getByTestId('cs-phase-detail')).toHaveTextContent('downloading 2024-09…');
+	});
+
 	it('shows the cache note and sends force_refresh when bypass is ticked', async () => {
 		const cached: JobStatus = {
 			...doneJob(),
@@ -217,6 +292,27 @@ describe('ChatStatsPanel', () => {
 		});
 		await waitFor(() => {
 			expect(screen.getByText(/Loaded from local cache/)).toBeInTheDocument();
+		});
+	});
+
+	it('notes a fresh download on a non-cached result', async () => {
+		mockCreateJob.mockResolvedValueOnce({
+			job_id: 'abc123',
+			script: 'chat_stats',
+			status: 'running',
+			progress: 0,
+			message: '',
+			result: null,
+			error: null
+		});
+		mockWaitJob.mockResolvedValueOnce(doneJob());
+
+		render(ChatStatsPanel);
+		await fillDates();
+		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
+
+		await waitFor(() => {
+			expect(screen.getByTestId('cs-fresh')).toHaveTextContent('Freshly downloaded');
 		});
 	});
 

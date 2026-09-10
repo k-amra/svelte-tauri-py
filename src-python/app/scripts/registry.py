@@ -13,12 +13,13 @@ import sys
 from types import ModuleType
 
 import app.scripts as scripts_pkg
+from frozen_scripts import FROZEN_SCRIPTS  # top-level module, next to app/
 
 log = logging.getLogger(__name__)
 
 # PyInstaller puts imported modules in its PYZ archive, where filesystem
 # discovery is not reliable. Keep this list in sync with api_server.spec.
-FROZEN_MODULES = ("chat_stats", "example_task")
+FROZEN_MODULES = FROZEN_SCRIPTS
 
 
 def discover() -> dict[str, ModuleType]:

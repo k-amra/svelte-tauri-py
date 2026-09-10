@@ -23,6 +23,9 @@
 
 from PyInstaller.utils.hooks import collect_all
 
+import os
+import ast
+
 # polars ships a compiled extension (polars.polars): collect everything
 # explicitly so frozen-mode discovery can't silently miss it.
 polars_datas, polars_binaries, polars_hiddenimports = collect_all('polars')
@@ -33,6 +36,44 @@ try:
     tzdata_datas, tzdata_binaries, tzdata_hiddenimports = collect_all('tzdata')
 except Exception:
     tzdata_datas, tzdata_binaries, tzdata_hiddenimports = [], [], []
+
+# Scripts are discovered via FROZEN_SCRIPTS in frozen_scripts.py, which
+# registry.py imports at runtime. Parse that file directly (instead of
+# importing it) so the spec never pulls the app package into the build
+# environment here. PyInstaller exec()s the spec without __file__ but with
+# SPECPATH set to the spec's directory (which is also the CWD when built
+# via `bun run build:sidecar`); fall back through both.
+def _spec_dir():
+    # PyInstaller exec()s the spec, so `__file__` is usually undefined;
+    # SPECPATH points at the spec's directory. Try SPECPATH first to avoid
+    # paying the NameError on every build.
+    candidates = [globals().get("SPECPATH")]
+    try:
+        candidates.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    candidates.append(os.getcwd())
+    for candidate in candidates:
+        if candidate and os.path.isfile(os.path.join(candidate, "frozen_scripts.py")):
+            return candidate
+    return os.getcwd()
+
+
+_frozen_path = os.path.join(_spec_dir(), "frozen_scripts.py")
+with open(_frozen_path, "r", encoding="utf-8") as f:
+    _tree = ast.parse(f.read())
+_frozen_scripts: list[str] = []
+for node in _tree.body:
+    if (
+        isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "FROZEN_SCRIPTS"
+        and isinstance(node.value, ast.Tuple)
+    ):
+        _frozen_scripts = [ast.literal_eval(el) for el in node.value.elts]
+        break
+if not _frozen_scripts:
+    raise RuntimeError("could not read FROZEN_SCRIPTS from frozen_scripts.py")
 
 block_cipher = None
 
@@ -50,7 +91,11 @@ a = Analysis(
         'app.services.log_cache',
         'app.services.emotes',
         'app.services.log_fetch',
-        'app.scripts.chat_stats',
+        # Scripts are discovered via FROZEN_SCRIPTS in frozen_scripts.py,
+        # which registry.py imports at runtime. Add them explicitly here
+        # because PyInstaller cannot see the dynamic import_module() call.
+        *[f'app.scripts.{name}' for name in _frozen_scripts],
+        'frozen_scripts',   # the module itself must be bundled
         'uvicorn.logging',
         'uvicorn.loops',
         'uvicorn.loops.auto',
@@ -68,7 +113,6 @@ a = Analysis(
         'app.routers.scripts',
         'app.routers.jobs',
         'app.scripts.registry',
-        'app.scripts.example_task',
         *polars_hiddenimports,
         *tzdata_hiddenimports,
     ],

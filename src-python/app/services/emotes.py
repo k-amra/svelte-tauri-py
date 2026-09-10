@@ -33,12 +33,21 @@ def _load_cache(channel_name: str, user_id: str | None) -> dict[str, str] | None
         return None
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        if time.time() - data.get("ts", 0) < CACHE_TTL_S:
-            cached = data.get("emotes", {})
-            return cached if isinstance(cached, dict) else None
-    except Exception:
+    except (OSError, json.JSONDecodeError) as e:
+        # Corrupt or unreadable cache — treat as a miss. A permission error
+        # would otherwise be invisible and every fetch would re-download.
+        log.warning("emote cache read failed for %s: %s — treating as miss", p, e)
         return None
-    return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        ts = float(data.get("ts", 0))
+    except (TypeError, ValueError):
+        return None
+    if time.time() - ts >= CACHE_TTL_S:
+        return None
+    cached = data.get("emotes")
+    return cached if isinstance(cached, dict) else None
 
 
 def _save_cache(channel_name: str, user_id: str | None, emotes: dict[str, str]) -> None:

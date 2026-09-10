@@ -14,8 +14,8 @@
 use std::{
     io::{BufRead, BufReader},
     sync::{
-        Mutex,
         atomic::{AtomicBool, Ordering},
+        Mutex,
     },
     time::{Duration, Instant},
 };
@@ -51,12 +51,39 @@ fn app_data_dir(app: &AppHandle) -> String {
     dir.to_string_lossy().to_string()
 }
 
+/// Kill a Windows process and all its descendants. PyInstaller's onefile
+/// bootloader spawns the real Python as a child of the bootloader, so
+/// CommandChild::kill() (TerminateProcess on the bootloader) leaves the
+/// Python process orphaned. taskkill /T walks the process tree.
+///
+/// On non-Windows this is a no-op; the caller falls back to child.kill().
+#[cfg(windows)]
+fn kill_process_tree(pid: u32) -> std::io::Result<()> {
+    use std::process::Command;
+    let status = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("taskkill exited with status {status}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn kill_process_tree(_pid: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Minimal blocking GET http://127.0.0.1:port/health (no extra deps).
 fn health_ok(port: u16) -> bool {
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-        &format!("127.0.0.1:{port}").parse().unwrap(),
-        Duration::from_millis(500),
-    ) else {
+    let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))
+    else {
         return false;
     };
     stream
@@ -213,9 +240,7 @@ fn spawn_dev(app: &AppHandle, token: &str, data_dir: &str) {
         cmd.current_dir(root);
     }
     let Ok(mut child) = cmd.spawn() else {
-        log::error!(
-            "SIDECAR_DEV: failed to spawn `uv run python -m app.main` (is uv installed?)"
-        );
+        log::error!("SIDECAR_DEV: failed to spawn `uv run python -m app.main` (is uv installed?)");
         return;
     };
 
@@ -269,21 +294,22 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
         let mut pending = String::new();
 
         // One complete stdout line: READY handshake (once) + drain logging.
-        let process_line = |handle: &AppHandle, token: &str, ready_sent: &mut bool, trimmed: &str| {
-            if !*ready_sent {
-                if let Some(port) = parse_ready_line(trimmed) {
-                    let ready_handle = handle.clone();
-                    let ready_token = token.to_string();
-                    std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
-                        on_ready(&ready_handle, port, ready_token);
-                    }));
-                    *ready_sent = true;
-                    return;
+        let process_line =
+            |handle: &AppHandle, token: &str, ready_sent: &mut bool, trimmed: &str| {
+                if !*ready_sent {
+                    if let Some(port) = parse_ready_line(trimmed) {
+                        let ready_handle = handle.clone();
+                        let ready_token = token.to_string();
+                        std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+                            on_ready(&ready_handle, port, ready_token);
+                        }));
+                        *ready_sent = true;
+                        return;
+                    }
                 }
-            }
-            // Keep draining after READY so the pipe never fills up.
-            log::debug!("[sidecar] {trimmed}");
-        };
+                // Keep draining after READY so the pipe never fills up.
+                log::debug!("[sidecar] {trimmed}");
+            };
 
         loop {
             // NOTE: the timeout wraps recv() itself. Checking elapsed time only
@@ -370,8 +396,12 @@ pub fn shutdown(app: &AppHandle) {
     if let Some((port, token)) = backend {
         post_shutdown(port, &token);
     }
-    // Give it a beat to exit cleanly, then fallback to kill.
+    // Give it a beat to exit cleanly, then fallback to a process-tree kill.
+    // On Windows the HTTP shutdown can fail (firewall, hung worker thread,
+    // rejected token), and killing only the bootloader would orphan the real
+    // Python process holding the port + cache lock.
     std::thread::sleep(Duration::from_millis(400));
+
     if let Some(child_state) = app.try_state::<SidecarChild>() {
         if let Some(child) = child_state
             .0
@@ -379,18 +409,34 @@ pub fn shutdown(app: &AppHandle) {
             .unwrap_or_else(|e| e.into_inner())
             .take()
         {
-            let _ = child.kill();
+            let pid = child.pid();
+            #[cfg(windows)]
+            {
+                match kill_process_tree(pid) {
+                    Ok(()) => log::info!("sidecar process tree {pid} killed via taskkill /T"),
+                    Err(e) => {
+                        log::warn!("taskkill /T {pid} failed: {e}; falling back to child.kill()");
+                        let _ = child.kill();
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                // kill_process_tree is a no-op on non-Windows; kill directly.
+                let _ = child.kill();
+            }
         }
     }
 
-    // Kill dev-mode sidecar (std::process::Child) as a fallback.
+    // Dev-mode sidecar (std::process::Child): same reasoning.
     if let Some(dev_state) = app.try_state::<DevChild>() {
-        if let Some(mut child) = dev_state
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
+        if let Some(mut child) = dev_state.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let pid = child.id();
+            #[cfg(windows)]
+            if kill_process_tree(pid).is_err() {
+                let _ = child.kill();
+            }
+            #[cfg(not(windows))]
             let _ = child.kill();
             let _ = child.wait(); // reap
         }

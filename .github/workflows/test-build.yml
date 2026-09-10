@@ -50,6 +50,17 @@ jobs:
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      # Warn-only (no -D warnings): the toolchain floats on stable, so new
+      # clippy lints must not break unrelated PRs. Pedantic stays an
+      # editor-side nudge via rust-analyzer settings.
+      - name: Rust clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 
       - name: install dependencies
         run: |

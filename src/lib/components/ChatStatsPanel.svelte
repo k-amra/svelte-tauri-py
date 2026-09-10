@@ -115,7 +115,8 @@
 				include_language: includeLanguage,
 				session_gap_minutes: sessionGapMinutes,
 				anomaly_sigma: anomalySigma,
-				force_refresh: forceRefresh
+				force_refresh: forceRefresh,
+				max_range_days: 366
 			});
 			const done = await api.waitJob(job.job_id, (j) => {
 				jobProgress = j.progress;
@@ -133,6 +134,29 @@
 			jobProgress = null;
 		}
 	}
+
+	/** Plain-language phase for the raw backend progress message.
+	 * Backend strings like "fetched X messages (page Y)" describe raw fetch
+	 * counters, so translate them into what the job is actually doing. */
+	function describePhase(message: string): string {
+		const msg = message.trim();
+		if (!msg) return 'Starting…';
+		if (msg.startsWith('cache hit')) return 'Loading from local cache…';
+		if (msg.startsWith('updating cache since'))
+			return 'Updating cache — downloading only new messages…';
+		if (msg.includes('fetching emotes')) return 'Loading emote catalog…';
+		if (msg.includes('merging with cache')) return 'Merging new messages with local cache…';
+		if (msg.includes('building dataframe') || msg.includes('computing stats')) {
+			return 'Computing statistics…';
+		}
+		if (msg.includes('connecting')) return 'Connecting to log server…';
+		if (msg.startsWith('done')) return 'Done';
+		if (msg.includes('downloading')) return 'Downloading chat logs…';
+		if (msg.includes('fetch')) return 'Downloading chat logs…';
+		return msg;
+	}
+
+	const phaseLabel = $derived(describePhase(jobMessage));
 
 	const maxHour = $derived(stats ? Math.max(1, ...stats.activity_by_hour) : 1);
 	const maxHeat = $derived(stats ? Math.max(1, ...stats.activity_by_weekday_hour.flat()) : 1);
@@ -200,15 +224,27 @@
 			</div>
 		</div>
 
-		<div class="grid grid-cols-2 gap-3">
-			<div>
-				<Label for="cs-from">From</Label>
-				<Input id="cs-from" type="datetime-local" bind:value={fromDate} class="mt-1" />
+		<div>
+			<div class="grid grid-cols-2 gap-3">
+				<div>
+					<Label for="cs-from">From</Label>
+					<Input id="cs-from" type="datetime-local" bind:value={fromDate} class="mt-1" />
+				</div>
+				<div>
+					<Label for="cs-to">To</Label>
+					<Input
+						id="cs-to"
+						type="datetime-local"
+						bind:value={toDate}
+						class="mt-1"
+						title="Exclusive: messages at exactly this timestamp are not counted."
+					/>
+				</div>
 			</div>
-			<div>
-				<Label for="cs-to">To</Label>
-				<Input id="cs-to" type="datetime-local" bind:value={toDate} class="mt-1" />
-			</div>
+			<p class="text-muted-foreground mt-1 text-xs">
+				“To” is exclusive: messages at exactly that timestamp are not included. To include all of
+				Jan 31, set “To” to Feb 1 00:00.
+			</p>
 		</div>
 
 		<div class="grid grid-cols-2 gap-3">
@@ -386,9 +422,13 @@
 						style="width: {Math.round(jobProgress)}%"
 					></div>
 				</div>
-				<p class="text-muted-foreground mt-1 text-xs">
-					{Math.round(jobProgress)}% {jobMessage}
+				<p class="mt-1 text-xs font-medium" data-testid="cs-phase">
+					{phaseLabel}
+					{Math.round(jobProgress)}%
 				</p>
+				{#if jobMessage}
+					<p class="text-muted-foreground text-xs" data-testid="cs-phase-detail">{jobMessage}</p>
+				{/if}
 			</div>
 		{/if}
 
@@ -413,8 +453,12 @@
 			{#if stats.from_cache}
 				<p class="text-muted-foreground text-sm">
 					Loaded from local cache{stats.cached_at
-						? ` (fetched ${new Date(stats.cached_at).toLocaleString()})`
+						? ` (downloaded ${new Date(stats.cached_at).toLocaleString()})`
 						: ''} — tick "Bypass cache" to re-download.
+				</p>
+			{:else}
+				<p class="text-muted-foreground text-sm" data-testid="cs-fresh">
+					Freshly downloaded — next run will reuse the local cache.
 				</p>
 			{/if}
 			{#if stats.truncated}

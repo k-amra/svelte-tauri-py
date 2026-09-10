@@ -217,16 +217,17 @@
 		{/if}
 
 		<div class="flex space-x-4">
-			<Button onclick={runSync} disabled={running || !backend.ready} class="flex-1">
-				{running ? 'Running…' : 'Run sync'}
+			<Button onclick={runJob} disabled={running || !backend.ready} class="flex-1">
+				{running ? 'Running…' : 'Run as job'}
 			</Button>
 			<Button
 				variant="outline"
-				onclick={runJob}
+				onclick={runSync}
 				disabled={running || !backend.ready}
 				class="flex-1"
+				title="Synchronous call — the HTTP response arrives only when the script completes. Use for scripts that finish in <2s."
 			>
-				Run as job
+				Run sync (short scripts only)
 			</Button>
 		</div>
 

@@ -76,6 +76,10 @@ jobs:
           )?.[1];
           const pyprojectVersion = pyproject.match(/^version = "([^"]+)"/m)?.[1];
 
+          // Add a new entry here when a source of truth is introduced.
+          // NOTE: src-python/app/__init__.py is intentionally NOT checked —
+          // it holds no version today. If you add `__version__ = "..."`,
+          // add a regex like the pyproject one above and register it here.
           const versions = {
             'package.json': packageJson.version,
             'src-tauri/tauri.conf.json': tauriConfig.version,

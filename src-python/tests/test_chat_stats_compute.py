@@ -141,6 +141,23 @@ def test_native_emote_names_excluded_from_top_words():
     assert "hello" in words
 
 
+def test_emote_only_uses_twitch_tag_names():
+    tagged = FullMessage(
+        type=1,
+        text="Kappa Kappa",
+        displayName="a",
+        timestamp=datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
+        id="1",
+        tags={"emotes": "25:0-4,6-10"},
+        username="a",
+        channel="chan",
+        raw="Kappa Kappa",
+    )
+    df = cs.messages_to_frame([tagged, msg("b", "hello world", datetime(2024, 1, 15, 11, 0, tzinfo=UTC))])
+    stats = cs.compute_stats(df, make_params(), {})
+    assert stats["message_classes"]["emote_only"] == 1
+
+
 def test_empty_frame_returns_zeroed_shapes():
     stats = cs.compute_stats(cs.messages_to_frame([]), make_params(top_n=20), {})
     assert stats["total_messages"] == 0
@@ -168,6 +185,20 @@ def test_messages_to_frame_parses_iso_and_drops_garbage():
     assert "user_id" in df.columns
     assert "role" in df.columns
     assert "id" in df.columns
+
+
+def test_clean_text_expr_strips_urls_and_mentions():
+    df = pl.DataFrame({"text": ["hey @alice check https://example.com/x KEEP"]})
+    lowered = df.select(cs._clean_text_expr().alias("c"))["c"].to_list()
+    assert lowered == ["hey   check   keep"]
+    cased = df.select(cs._clean_text_expr(lowercase=False).alias("c"))["c"].to_list()
+    assert cased == ["hey   check   KEEP"]
+
+
+def test_messages_to_frame_empty_dtypes_match_non_empty():
+    full = cs.messages_to_frame([msg("a", "hi", datetime(2024, 1, 15, 10, 0, tzinfo=UTC))])
+    empty = cs.messages_to_frame([])
+    assert full.schema == empty.schema
 
 
 def test_overview_includes_medians_and_roles():

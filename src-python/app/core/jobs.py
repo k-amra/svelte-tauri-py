@@ -11,9 +11,12 @@ import threading
 import time
 import traceback
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+MAX_EVENTS_PER_JOB = 500  # ring buffer; enough for the SSE UI to tail
 
 
 @dataclass
@@ -26,14 +29,25 @@ class Job:
     result: Any | None = None
     error: str | None = None
     created_at: float = field(default_factory=time.time)
-    events: list[dict] = field(default_factory=list)
+    events: deque[dict] = field(default_factory=lambda: deque(maxlen=MAX_EVENTS_PER_JOB))
+    # Monotonic sequence assigned to each pushed event. Survives ring-buffer
+    # drops: the client cursor is compared against seq, not list index.
+    next_seq: int = 0
 
     def push(self, pct: float, msg: str = "") -> None:
         self.progress = pct
         self.message = msg
-        self.events.append({"progress": pct, "message": msg, "t": time.time()})
+        self.events.append({
+            "seq": self.next_seq,
+            "progress": pct,
+            "message": msg,
+            "t": time.time(),
+        })
+        self.next_seq += 1
 
     def to_dict(self) -> dict:
+        # NOTE: events are intentionally excluded from the snapshot; the
+        # SSE endpoint is the only consumer of the event stream.
         return {
             "job_id": self.id,
             "script": self.script,
@@ -104,12 +118,22 @@ class JobManager:
             return job.to_dict() if job is not None else None
 
     def events_since(self, job_id: str, seen: int) -> tuple[list[dict], str, dict] | None:
-        """Copy events and status atomically for the SSE endpoint."""
+        """Return (events newer than `seen`, status, snapshot).
+
+        `seen` is a monotonic sequence number (the `seq` of the last event
+        the caller processed), NOT a list index. If the deque has dropped
+        events the caller hasn't seen, those are silently skipped — the
+        alternative (blocking the ring buffer) would grow memory without
+        bound for a stalled consumer.
+        """
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 return None
-            return list(job.events[seen:]), job.status, job.to_dict()
+            # deque is small (<=500); linear scan is fine and avoids a
+            # bisect dance over a possibly-wrapped deque.
+            batch = [ev for ev in job.events if ev["seq"] > seen]
+            return batch, job.status, job.to_dict()
 
 
 jobs = JobManager()

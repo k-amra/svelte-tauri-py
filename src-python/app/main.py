@@ -51,16 +51,23 @@ def create_app(token: str, *, enable_docs: bool = False) -> FastAPI:
     app.state.token = token
     app.state.verify_token = verify
 
-    app.add_middleware(
-        CORSMiddleware,
-        # Tauri 2 uses http://tauri.localhost for the Windows production WebView.
-        # Keep the dev origins and the legacy tauri:// origin for other platforms.
-        allow_origins=[
-            "http://tauri.localhost",
-            "tauri://localhost",
+    # Tauri 2 uses http://tauri.localhost for the Windows production WebView.
+    # Keep the legacy tauri:// origin for other platforms. Dev origins
+    # (vite) are only added when SIDECAR_DEV=1 so production builds do not
+    # accept a cross-origin request from a local dev port.
+    allow_origins = [
+        "http://tauri.localhost",
+        "tauri://localhost",
+    ]
+    if os.environ.get("SIDECAR_DEV") == "1":
+        allow_origins += [
             "http://localhost:1420",
             "http://127.0.0.1:1420",
-        ],
+        ]
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allow_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
