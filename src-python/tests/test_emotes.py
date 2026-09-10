@@ -34,6 +34,12 @@ def tagged_msg(username: str, text: str, emotes_tag: str | None) -> FullMessage:
     )
 
 
+def _count(df: pl.DataFrame, emote_map: dict[str, str], limit: int = 50) -> list[dict]:
+    twitch_emotes = chat_stats._parse_twitch_emotes(df)
+    counts, _ = chat_stats._count_emotes(df, twitch_emotes, emote_map, limit)
+    return counts
+
+
 def test_count_parses_irc_tag_occurrences():
     df = chat_stats.messages_to_frame(
         [
@@ -42,7 +48,7 @@ def test_count_parses_irc_tag_occurrences():
             tagged_msg("c", "plain text", None),
         ]
     )
-    counts = chat_stats._count_emotes_from_frame(df, {"25": "Kappa", "1902": "Keepo"})
+    counts = _count(df, {"25": "Kappa", "1902": "Keepo"})
     assert counts == [
         {"name": "Keepo", "count": 3},
         {"name": "Kappa", "count": 2},
@@ -57,14 +63,14 @@ def test_count_unresolvable_positions_kept_in_brackets():
             tagged_msg("b", "hello", "999:xx"),
         ]
     )
-    assert chat_stats._count_emotes_from_frame(df, {}) == [{"name": "[999]", "count": 2}]
+    assert _count(df, {}) == [{"name": "[999]", "count": 2}]
 
 
 def test_count_mixes_tag_extraction_and_third_party_text_match():
     # "Kappa" comes from the Twitch tag; "KEKW" (third-party, never tagged)
     # is matched against the catalog — without double-counting "Kappa".
     df = chat_stats.messages_to_frame([tagged_msg("a", "Kappa KEKW Kappa", "25:0-4,11-15")])
-    counts = chat_stats._count_emotes_from_frame(df, {"25": "Kappa", "b1": "KEKW"})
+    counts = _count(df, {"25": "Kappa", "b1": "KEKW"})
     assert counts == [
         {"name": "Kappa", "count": 2},
         {"name": "KEKW", "count": 1},
@@ -73,28 +79,33 @@ def test_count_mixes_tag_extraction_and_third_party_text_match():
 
 def test_count_falls_back_to_text_matching_without_tags():
     df = chat_stats.messages_to_frame([tagged_msg("a", "hello Kappa world", None)])
-    assert chat_stats._count_emotes_from_frame(df, {"25": "Kappa"}) == [{"name": "Kappa", "count": 1}]
+    assert _count(df, {"25": "Kappa"}) == [{"name": "Kappa", "count": 1}]
 
 
 def test_count_is_case_sensitive():
     df = chat_stats.messages_to_frame([tagged_msg("a", "LULW lulw LULW", None)])
-    assert chat_stats._count_emotes_from_frame(df, {"x": "LULW"}) == [{"name": "LULW", "count": 2}]
+    assert _count(df, {"x": "LULW"}) == [{"name": "LULW", "count": 2}]
 
 
 def test_count_keeps_underscored_names_whole():
     df = chat_stats.messages_to_frame([tagged_msg("a", "monkaS_Steer hello monkaS_Steer", None)])
-    assert chat_stats._count_emotes_from_frame(df, {"m": "monkaS_Steer"}) == [
+    assert _count(df, {"m": "monkaS_Steer"}) == [
         {"name": "monkaS_Steer", "count": 2}
     ]
 
 
 def test_count_missing_column_returns_empty():
     df = pl.DataFrame({"username": ["a"], "text": ["hi"]})
-    assert chat_stats._count_emotes_from_frame(df, {"25": "Kappa"}) == []
+    assert _count(df, {"25": "Kappa"}) == []
 
 
 def test_empty_stats_includes_top_emotes():
-    assert chat_stats.compute_stats(chat_stats.messages_to_frame([]), 20)["top_emotes"] == []
+    params = chat_stats.Params(
+        channel="chan",
+        from_date=datetime(2024, 1, 1, tzinfo=UTC),
+        to_date=datetime(2024, 1, 2, tzinfo=UTC),
+    )
+    assert chat_stats.compute_stats(chat_stats.messages_to_frame([]), params, {})["top_emotes"] == []
 
 
 class FakeResponse:

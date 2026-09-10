@@ -26,14 +26,21 @@ from PyInstaller.utils.hooks import collect_all
 # polars ships a compiled extension (polars.polars): collect everything
 # explicitly so frozen-mode discovery can't silently miss it.
 polars_datas, polars_binaries, polars_hiddenimports = collect_all('polars')
+# tzdata supplies the IANA database for zoneinfo on Windows: without it any
+# tz-aware polars -> Python conversion (iter_rows, min(), to_list() on a
+# Datetime(time_zone=...) column) raises ZoneInfoNotFoundError.
+try:
+    tzdata_datas, tzdata_binaries, tzdata_hiddenimports = collect_all('tzdata')
+except Exception:
+    tzdata_datas, tzdata_binaries, tzdata_hiddenimports = [], [], []
 
 block_cipher = None
 
 a = Analysis(
     ['app/main.py'],
     pathex=[],
-    binaries=polars_binaries,
-    datas=polars_datas,
+    binaries=polars_binaries + tzdata_binaries,
+    datas=polars_datas + tzdata_datas,
     hiddenimports=[
         'httpx',
         'app.services',
@@ -63,6 +70,7 @@ a = Analysis(
         'app.scripts.registry',
         'app.scripts.example_task',
         *polars_hiddenimports,
+        *tzdata_hiddenimports,
     ],
     hookspath=[],
     hooksconfig={},

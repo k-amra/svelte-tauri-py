@@ -16,7 +16,8 @@ Validity rules:
 Layout:
     <data-dir>/cache/chat_stats/v1/<fingerprint>.parquet   (username/text/ts)
     <data-dir>/cache/chat_stats/v2/<fingerprint>.parquet   (username/text/ts/emotes_tag/id)
-    <data-dir>/cache/chat_stats/v2/<fingerprint>.json      (fetch metadata)
+    <data-dir>/cache/chat_stats/v3/<fingerprint>.parquet   (user_id/username/text/ts/emotes_tag/id/role)
+    <data-dir>/cache/chat_stats/v3/<fingerprint>.json      (fetch metadata)
 
 Only the columns compute_stats needs are cached (drops raw/tags/...), which
 keeps files small. Bump CACHE_VERSION if the cached schema ever changes.
@@ -39,7 +40,7 @@ from app.core import paths
 
 log = logging.getLogger(__name__)
 
-CACHE_VERSION = "v2"
+CACHE_VERSION = "v3"
 LIVE_TTL_S = 15 * 60  # ranges that touch "now" expire after this
 IMMUTABLE_MARGIN_S = 60 * 60  # ranges ending this far in the past are immutable
 MAX_CACHE_BYTES = 500 * 1024 * 1024  # evict oldest entries above this

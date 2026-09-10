@@ -102,7 +102,11 @@ def test_top_up_appends_delta_and_dedupes_overlap(monkeypatch):
     result = chat_stats.run(_params(from_date, to_date))
 
     assert len(seen) == 1
-    assert seen[0].from_date == datetime.fromtimestamp(fetched_at, UTC)
+    # Top-up overlaps the previous fetch by 10 minutes to avoid gaps.
+    expected_since = datetime.fromtimestamp(fetched_at, UTC) - timedelta(minutes=10)
+    if expected_since < from_date:
+        expected_since = from_date
+    assert seen[0].from_date == expected_since
     assert result.total_messages == 3
     assert result.from_cache is False
     assert result.truncated is False
@@ -156,3 +160,5 @@ def test_top_up_preserves_truncated_flag(monkeypatch):
 def test_frame_carries_message_ids():
     df = chat_stats.messages_to_frame([_msg("abc", BASE)])
     assert df["id"].to_list() == ["abc"]
+    assert df["user_id"].to_list() == ["u"]
+    assert df["role"].to_list() == ["regular"]
