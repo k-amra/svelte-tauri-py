@@ -8,6 +8,7 @@ import pytest
 
 from app.core import paths
 from app.scripts import chat_stats
+from app.scripts.chat_stats import fetcher
 from app.services import log_cache
 from app.services.harambelogs_client import HarambelogsAPI, HarambelogsError
 from app.services.harambelogs_models import FullMessage
@@ -25,7 +26,7 @@ def _no_calendar(monkeypatch):
     async def _none(api, channel_id_type, channel):
         return None
 
-    monkeypatch.setattr(chat_stats, "channel_log_days", _none)
+    monkeypatch.setattr(fetcher, "channel_log_days", _none)
 
 
 def _msg(mid: str, ts: datetime, text: str = "hello world") -> FullMessage:
@@ -89,8 +90,8 @@ def _stub_fetch(monkeypatch, pool: list[FullMessage], calls: list, truncated: bo
     async def fake_emotes(channel_name, user_id):
         return {}
 
-    monkeypatch.setattr(chat_stats, "fetch_channel_logs", fake_fetch)
-    monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
+    monkeypatch.setattr(fetcher, "fetch_channel_logs", fake_fetch)
+    monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
 
 
 def _live_month_range() -> tuple[datetime, datetime]:
@@ -237,7 +238,7 @@ def test_quiet_month_contributes_empty_and_caches(monkeypatch):
 
     monkeypatch.setattr(HarambelogsAPI, "get_channel_logs", fake_get_logs)
     monkeypatch.setattr(HarambelogsAPI, "get_list", fake_get_list)
-    monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
+    monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
 
     params = _params(datetime(2021, 1, 15, tzinfo=UTC), datetime(2021, 4, 15, 23, 0, tzinfo=UTC))
     result = chat_stats.run(params)

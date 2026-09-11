@@ -189,9 +189,9 @@ def test_messages_to_frame_parses_iso_and_drops_garbage():
 
 def test_clean_text_expr_strips_urls_and_mentions():
     df = pl.DataFrame({"text": ["hey @alice check https://example.com/x KEEP"]})
-    lowered = df.select(cs._clean_text_expr().alias("c"))["c"].to_list()
+    lowered = df.select(cs.clean_text_expr().alias("c"))["c"].to_list()
     assert lowered == ["hey   check   keep"]
-    cased = df.select(cs._clean_text_expr(lowercase=False).alias("c"))["c"].to_list()
+    cased = df.select(cs.clean_text_expr(lowercase=False).alias("c"))["c"].to_list()
     assert cased == ["hey   check   KEEP"]
 
 
@@ -631,14 +631,14 @@ def test_language_by_day_reseed_is_stable(monkeypatch):
 
 
 def test_message_classes_single_pass_matches_expected():
-    from app.scripts.chat_stats import _compute_message_classes, _parse_twitch_emotes
-
+    from app.scripts.chat_stats.analytics.health import compute_message_classes
+    from app.scripts.chat_stats.frame import parse_twitch_emotes
     df = pl.DataFrame({
         "text": ["hi", "Hello?", "LOUD NOISES", "!", "Kappa", "Kappa Kappa", "a" * 250, "x"],
         "emotes_tag": ["", "", "", "", "25:0-4", "25:0-4/25:6-10", "", ""],
     })
-    twitch_emotes = _parse_twitch_emotes(df)
-    result = _compute_message_classes(df, twitch_emotes, {})["message_classes"]
+    twitch_emotes = parse_twitch_emotes(df)
+    result = compute_message_classes(df, twitch_emotes, {})["message_classes"]
     assert result["questions"] == 1  # "Hello?"
     assert result["exclamations"] == 1  # "!"
     assert result["short_messages"] == 3  # "hi", "!", "x"
@@ -648,17 +648,17 @@ def test_message_classes_single_pass_matches_expected():
 
 def test_poisson_upper_tail_known_value():
     # Poisson(10): P(X>=20) ≈ 0.0035, P(X>=21) ≈ 0.0016 (standard tables).
-    p = cs._poisson_upper_tail(20, 10.0)
+    p = cs.poisson_upper_tail(20, 10.0)
     assert abs(p - 0.0035) < 1e-4
-    assert abs(cs._poisson_upper_tail(21, 10.0) - 0.0016) < 1e-4
-    assert cs._poisson_upper_tail(0, 10.0) == 1.0
-    assert cs._poisson_lower_tail(-1, 10.0) == 0.0
+    assert abs(cs.poisson_upper_tail(21, 10.0) - 0.0016) < 1e-4
+    assert cs.poisson_upper_tail(0, 10.0) == 1.0
+    assert cs.poisson_lower_tail(-1, 10.0) == 0.0
     # Degenerate lambda: all mass at 0.
-    assert cs._poisson_upper_tail(1, 0.0) == 0.0
-    assert cs._poisson_lower_tail(0, 0.0) == 1.0
+    assert cs.poisson_upper_tail(1, 0.0) == 0.0
+    assert cs.poisson_lower_tail(0, 0.0) == 1.0
     # Symmetric sanity: P(X<=10) + P(X>=11) == 1 for λ=10.
-    lo = cs._poisson_lower_tail(10, 10.0)
-    hi = cs._poisson_upper_tail(11, 10.0)
+    lo = cs.poisson_lower_tail(10, 10.0)
+    hi = cs.poisson_upper_tail(11, 10.0)
     assert abs(lo + hi - 1.0) < 1e-9
 
 
@@ -668,13 +668,13 @@ def test_weekly_seasonality_mean_is_one():
         {"date": (base + timedelta(days=i)).date().isoformat(), "count": 30 if (base + timedelta(days=i)).weekday() == 5 else 10}
         for i in range(14)
     ]
-    trend, seasonality = cs._decompose_weekly_seasonality(mpd)
+    trend, seasonality = cs.decompose_weekly_seasonality(mpd)
     assert seasonality is not None
     assert len(seasonality) == 7
     assert abs(sum(seasonality) / 7 - 1.0) < 1e-9
     assert seasonality[5] > 1.0  # Saturday runs hot
     assert len(trend) == 14
-    assert cs._decompose_weekly_seasonality(mpd[:3]) == ([], None)
+    assert cs.decompose_weekly_seasonality(mpd[:3]) == ([], None)
 
 
 def test_quote_reply_window_boundary():

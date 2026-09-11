@@ -8,6 +8,8 @@ import pytest
 
 from app.core import paths
 from app.scripts import chat_stats
+from app.scripts.chat_stats import fetcher
+from app.scripts.chat_stats.analytics.emotes import count_emotes
 from app.services import emotes
 from app.services.harambelogs_models import FullMessage
 
@@ -24,7 +26,7 @@ def _no_calendar(monkeypatch):
     async def _none(api, channel_id_type, channel):
         return None
 
-    monkeypatch.setattr(chat_stats, "channel_log_days", _none)
+    monkeypatch.setattr(fetcher, "channel_log_days", _none)
 
 
 def tagged_msg(username: str, text: str, emotes_tag: str | None) -> FullMessage:
@@ -45,8 +47,8 @@ def tagged_msg(username: str, text: str, emotes_tag: str | None) -> FullMessage:
 
 
 def _count(df: pl.DataFrame, emote_map: dict[str, str], limit: int = 50) -> list[dict]:
-    twitch_emotes = chat_stats._parse_twitch_emotes(df)
-    counts, _ = chat_stats._count_emotes(df, twitch_emotes, emote_map, limit)
+    twitch_emotes = chat_stats.parse_twitch_emotes(df)
+    counts, _ = count_emotes(df, twitch_emotes, emote_map, limit)
     return counts
 
 
@@ -212,8 +214,8 @@ def test_run_includes_top_emotes_and_twitch_id(monkeypatch):
         assert user_id == "12345"  # extracted from the room-id tag
         return {"25": "Kappa"}
 
-    monkeypatch.setattr(chat_stats, "fetch_channel_logs", fake_fetch)
-    monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
+    monkeypatch.setattr(fetcher, "fetch_channel_logs", fake_fetch)
+    monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
     result = chat_stats.run(
         chat_stats.Params(
             channel="chan",
@@ -221,7 +223,7 @@ def test_run_includes_top_emotes_and_twitch_id(monkeypatch):
             to_date=datetime(2024, 1, 16, tzinfo=UTC),
         )
     )
-    assert result.top_emotes == [chat_stats.EmoteCount(name="Kappa", count=2)]
+    assert result.top_emotes == [chat_stats.models.EmoteCount(name="Kappa", count=2)]
     assert result.from_cache is False
     # Single month in range: exactly one span fetch.
     assert len(seen) == 1

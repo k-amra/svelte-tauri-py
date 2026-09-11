@@ -1,9 +1,9 @@
 /**
  * Hand-written mirror of the `chat_stats` Pydantic `Result` + `Params`
- * (src-python/app/scripts/chat_stats.py). `types.ts` stays the generated
+ * (src-python/app/scripts/chat_stats/models.py). `types.ts` stays the generated
  * placeholder; this file tracks the one capability with a rich result shape.
  *
- * Keep in sync with Params/Result in chat_stats.py (v4.5).
+ * Keep in sync with Params/Result in chat_stats/models.py (v4.5).
  */
 export interface TopChatterStat {
 	user_id: string;
@@ -299,6 +299,10 @@ export interface ChatStatsResult {
 export interface ChatStatsParams {
 	channel: string;
 	channel_id_type: 'channel' | 'channelid';
+	/** Optional single-user filter. Omit or leave undefined for whole-channel. */
+	user?: string;
+	/** Which column the `user` value matches. Defaults to 'user' on the backend. */
+	user_id_type?: 'user' | 'userid';
 	from_date: string;
 	to_date: string;
 	top_n: number;

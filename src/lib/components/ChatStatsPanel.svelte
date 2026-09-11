@@ -10,6 +10,8 @@
 
 	let channel = $state('demonzz1');
 	let channelType = $state<'channel' | 'channelid'>('channel');
+	let userFilter = $state('');
+	let userFilterType = $state<'user' | 'userid'>('user');
 	let fromDate = $state('');
 	let toDate = $state('');
 	let topN = $state(20);
@@ -111,6 +113,10 @@
 			const job = await api.createJob('chat_stats', {
 				channel: channel.trim(),
 				channel_id_type: channelType,
+				// `undefined` is dropped by JSON.stringify, so the backend's
+				// `user=None` default kicks in for whole-channel runs.
+				user: userFilter.trim() || undefined,
+				user_id_type: userFilterType,
 				from_date: toRFC3339(fromDate),
 				to_date: toRFC3339(toDate),
 				top_n: topN,
@@ -186,6 +192,7 @@
 	}
 
 	const phaseLabel = $derived(describePhase(jobMessage));
+	const isPerUser = $derived(userFilter.trim().length > 0);
 
 	const maxHour = $derived(stats ? Math.max(1, ...stats.activity_by_hour) : 1);
 	const maxHeat = $derived(stats ? Math.max(1, ...stats.activity_by_weekday_hour.flat()) : 1);
@@ -288,7 +295,9 @@
 <Card class="w-120 shadow-xl backdrop-blur-sm">
 	<Header class="pt-6">
 		<Title class="text-center text-2xl font-bold">Chat Statistics</Title>
-		<p class="text-muted-foreground text-center text-sm">Polars-powered channel analytics (UTC)</p>
+		<p class="text-muted-foreground text-center text-sm">
+			Polars-powered {isPerUser ? 'user' : 'channel'} analytics (UTC)
+		</p>
 	</Header>
 	<Content class="space-y-4 p-6">
 		<div class="grid grid-cols-2 gap-3">
@@ -306,6 +315,29 @@
 			<div>
 				<Label for="cs-channel">Channel</Label>
 				<Input id="cs-channel" bind:value={channel} placeholder="e.g., demonzz1" class="mt-1" />
+			</div>
+		</div>
+
+		<div class="grid grid-cols-2 gap-3">
+			<div>
+				<Label for="cs-user-type">User Type</Label>
+				<select
+					id="cs-user-type"
+					bind:value={userFilterType}
+					class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+				>
+					<option value="user">user</option>
+					<option value="userid">userid</option>
+				</select>
+			</div>
+			<div>
+				<Label for="cs-user">User (optional)</Label>
+				<Input
+					id="cs-user"
+					bind:value={userFilter}
+					placeholder="blank = whole channel"
+					class="mt-1"
+				/>
 			</div>
 		</div>
 
@@ -721,28 +753,30 @@
 				</div>
 			{/if}
 
-			<div>
-				<p class="mb-1 text-sm font-medium">Top chatters</p>
-				<div class="space-y-1">
-					{#each stats.top_chatters as t (t.user_id)}
-						<div class="flex items-center gap-2 text-xs">
-							<span
-								class="w-24 truncate"
-								title={t.engagement_score != null
-									? `engagement ${t.engagement_score} · ${t.activeDays}d active`
-									: `${t.activeDays}d active`}>{t.username}</span
-							>
-							<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-								<div
-									class="h-full bg-teal-500"
-									style="width: {(t.messageCount / maxTop) * 100}%"
-								></div>
+			{#if !isPerUser}
+				<div>
+					<p class="mb-1 text-sm font-medium">Top chatters</p>
+					<div class="space-y-1">
+						{#each stats.top_chatters as t (t.user_id)}
+							<div class="flex items-center gap-2 text-xs">
+								<span
+									class="w-24 truncate"
+									title={t.engagement_score != null
+										? `engagement ${t.engagement_score} · ${t.activeDays}d active`
+										: `${t.activeDays}d active`}>{t.username}</span
+								>
+								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
+									<div
+										class="h-full bg-teal-500"
+										style="width: {(t.messageCount / maxTop) * 100}%"
+									></div>
+								</div>
+								<span class="w-12 text-right">{t.messageCount.toLocaleString()}</span>
 							</div>
-							<span class="w-12 text-right">{t.messageCount.toLocaleString()}</span>
-						</div>
-					{/each}
+						{/each}
+					</div>
 				</div>
-			</div>
+			{/if}
 
 			<div>
 				<p class="mb-1 text-sm font-medium">Activity by hour (UTC)</p>
@@ -1117,7 +1151,7 @@
 				</div>
 			{/if}
 
-			{#if stats.concentration.gini_coefficient != null}
+			{#if !isPerUser && stats.concentration.gini_coefficient != null}
 				<div class="text-xs">
 					<p class="mb-1 text-sm font-medium">Concentration</p>
 					<p class="text-muted-foreground">
@@ -1204,7 +1238,7 @@
 				</div>
 			{/if}
 
-			{#if stats.lorenz_samples.length > 0}
+			{#if !isPerUser && stats.lorenz_samples.length > 0}
 				<div>
 					<p class="mb-1 text-sm font-medium">Lorenz curve (message share by top %)</p>
 					<ul class="text-xs">
@@ -1237,7 +1271,7 @@
 				</div>
 			{/if}
 
-			{#if stats.mutual_mention_pairs.length > 0}
+			{#if !isPerUser && stats.mutual_mention_pairs.length > 0}
 				<div>
 					<p class="mb-1 text-sm font-medium">Mutual mentions</p>
 					<div class="space-y-1">

@@ -6,6 +6,7 @@ import pytest
 
 from app.core import paths
 from app.scripts import chat_stats
+from app.scripts.chat_stats import fetcher
 from app.services import log_cache
 from app.services.harambelogs_client import HarambelogsError
 from app.services.harambelogs_models import FullMessage
@@ -23,7 +24,7 @@ def _no_calendar(monkeypatch):
     async def _none(api, channel_id_type, channel):
         return None
 
-    monkeypatch.setattr(chat_stats, "channel_log_days", _none)
+    monkeypatch.setattr(fetcher, "channel_log_days", _none)
 
 
 def _msg(mid: str, ts: datetime, text: str = "hello world") -> FullMessage:
@@ -56,8 +57,8 @@ def _stub_fetch(monkeypatch, pool: list[FullMessage], calls: list):
     async def fake_emotes(channel_name, user_id):
         return {}
 
-    monkeypatch.setattr(chat_stats, "fetch_channel_logs", fake_fetch)
-    monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
+    monkeypatch.setattr(fetcher, "fetch_channel_logs", fake_fetch)
+    monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
 
 
 def _params(from_date: datetime, to_date: datetime, **overrides):
@@ -161,15 +162,15 @@ def test_span_failure_names_the_month(monkeypatch):
     async def fake_emotes(channel_name, user_id):
         return {}
 
-    monkeypatch.setattr(chat_stats, "fetch_channel_logs", boom)
-    monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
+    monkeypatch.setattr(fetcher, "fetch_channel_logs", boom)
+    monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
     with pytest.raises(HarambelogsError, match=r"\[2024-09"):
         chat_stats.run(_params(datetime(2024, 9, 1, tzinfo=UTC), datetime(2024, 9, 5, tzinfo=UTC)))
 
 
 def test_transient_span_failure_retries_span(monkeypatch):
     """A blip killing a span mid-month retries the span instead of the job."""
-    monkeypatch.setattr(chat_stats, "SPAN_RETRY_COOLDOWN_S", 0.01)
+    monkeypatch.setattr(fetcher, "SPAN_RETRY_COOLDOWN_S", 0.01)
     attempts: list = []
 
     async def flaky(api, channel_id_type, channel, from_date, to_date, **kwargs):
@@ -181,8 +182,8 @@ def test_transient_span_failure_retries_span(monkeypatch):
     async def fake_emotes(channel_name, user_id):
         return {}
 
-    monkeypatch.setattr(chat_stats, "fetch_channel_logs", flaky)
-    monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
+    monkeypatch.setattr(fetcher, "fetch_channel_logs", flaky)
+    monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
 
     result = chat_stats.run(_params(datetime(2024, 9, 1, tzinfo=UTC), datetime(2024, 9, 2, tzinfo=UTC)))
     assert result.total_messages == 1
@@ -192,7 +193,7 @@ def test_transient_span_failure_retries_span(monkeypatch):
 
 
 def test_persistent_span_failure_names_the_month(monkeypatch):
-    monkeypatch.setattr(chat_stats, "SPAN_RETRY_COOLDOWN_S", 0.01)
+    monkeypatch.setattr(fetcher, "SPAN_RETRY_COOLDOWN_S", 0.01)
     attempts: list = []
 
     async def dead(api, channel_id_type, channel, from_date, to_date, **kwargs):
@@ -202,8 +203,8 @@ def test_persistent_span_failure_names_the_month(monkeypatch):
     async def fake_emotes(channel_name, user_id):
         return {}
 
-    monkeypatch.setattr(chat_stats, "fetch_channel_logs", dead)
-    monkeypatch.setattr(chat_stats, "fetch_channel_emotes", fake_emotes)
+    monkeypatch.setattr(fetcher, "fetch_channel_logs", dead)
+    monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
     with pytest.raises(HarambelogsError, match=r"\[2024-09"):
         chat_stats.run(_params(datetime(2024, 9, 1, tzinfo=UTC), datetime(2024, 9, 2, tzinfo=UTC)))
     assert len(attempts) == 2  # initial + one span retry
@@ -229,7 +230,7 @@ def test_range_clamped_to_logged_history(monkeypatch):
     calls: list = []
     _stub_fetch(monkeypatch, pool, calls)
     # Override the file's offline fixture: this test opts into the calendar.
-    monkeypatch.setattr(chat_stats, "channel_log_days", fake_days)
+    monkeypatch.setattr(fetcher, "channel_log_days", fake_days)
 
     notes: list = []
     params = _params(
@@ -280,15 +281,15 @@ def test_disjoint_ranges_fetch_only_the_gap(monkeypatch):
 
 
 def test_get_months_range():
-    assert chat_stats._get_months_range(datetime(2024, 1, 15, tzinfo=UTC), datetime(2024, 1, 20, tzinfo=UTC)) == [
+    assert fetcher._get_months_range(datetime(2024, 1, 15, tzinfo=UTC), datetime(2024, 1, 20, tzinfo=UTC)) == [
         (2024, 1)
     ]
-    assert chat_stats._get_months_range(datetime(2024, 1, 15, tzinfo=UTC), datetime(2024, 3, 2, tzinfo=UTC)) == [
+    assert fetcher._get_months_range(datetime(2024, 1, 15, tzinfo=UTC), datetime(2024, 3, 2, tzinfo=UTC)) == [
         (2024, 1),
         (2024, 2),
         (2024, 3),
     ]
-    assert chat_stats._get_months_range(datetime(2024, 12, 30, tzinfo=UTC), datetime(2025, 1, 2, tzinfo=UTC)) == [
+    assert fetcher._get_months_range(datetime(2024, 12, 30, tzinfo=UTC), datetime(2025, 1, 2, tzinfo=UTC)) == [
         (2024, 12),
         (2025, 1),
     ]
