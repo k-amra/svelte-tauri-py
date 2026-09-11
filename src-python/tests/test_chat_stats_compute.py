@@ -1,6 +1,6 @@
 """Unit tests for the pure analytics layer (no network)."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import polars as pl
 
@@ -233,3 +233,472 @@ def test_commands_links_mentions_and_health():
     assert any(d["domain"] == "example.com" for d in stats["top_domains"])
     assert stats["messages_with_mentions"] == 3
     assert stats["duplicate_message_count"] >= 1
+
+
+def test_self_repetition_counts_same_user_repeats_only():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "hi", base),
+        ("a", "hi", base + timedelta(minutes=1)),
+        ("b", "hi", base + timedelta(minutes=2)),
+        ("b", "yo", base + timedelta(minutes=3)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["self_repetition_count"] == 1
+    assert stats["self_repetition_pct"] == 25.0
+
+
+def test_copy_paste_requires_different_users():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [("a", "spam spam", base + timedelta(seconds=10 * i)) for i in range(3)]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["cross_user_copy_paste_count"] == 0
+    assert stats["cross_user_copy_paste_texts"] == 0
+    assert stats["top_copy_paste_chains"] == []
+
+
+def test_copy_paste_counts_cross_user_reposts_in_window():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "raid incoming", base),
+        ("b", "raid incoming", base + timedelta(seconds=20)),
+        ("c", "raid incoming", base + timedelta(seconds=40)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["cross_user_copy_paste_count"] == 2
+    assert stats["cross_user_copy_paste_texts"] == 1
+    assert stats["top_copy_paste_chains"] == [
+        {"text": "raid incoming", "occurrences": 2, "distinct_users": 3}
+    ]
+
+
+def test_copy_paste_window_boundary_excluded():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "raid incoming", base + timedelta(seconds=61 * i)) for i in range(4)
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["cross_user_copy_paste_count"] == 0
+    assert stats["cross_user_copy_paste_texts"] == 0
+    assert stats["top_copy_paste_chains"] == []
+
+
+def test_peak_concurrent_chatters():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "one", base),
+        ("b", "two", base + timedelta(minutes=1)),
+        ("c", "three", base + timedelta(minutes=2)),
+        ("d", "lonely", base + timedelta(hours=1)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["peak_concurrent_chatters"] == 3
+    assert stats["peak_concurrent_window"] == "2024-01-15T10:00:00+00:00"
+
+
+def test_vocab_richness_and_unique_words():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "alpha beta gamma", base),
+        ("b", "alpha beta gamma", base + timedelta(minutes=1)),
+        ("c", "alpha", base + timedelta(minutes=2)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["unique_word_count"] == 3
+    assert stats["vocab_richness"] == round(3 / 7, 4)
+
+
+def test_emote_diversity_per_user():
+    def tagged(mid: str, user: str, text: str, tag: str, ts: datetime) -> FullMessage:
+        return FullMessage(
+            type=1,
+            text=text,
+            displayName=user,
+            timestamp=ts,
+            id=mid,
+            tags={"emotes": tag},
+            username=user,
+            channel="chan",
+            raw=text,
+        )
+
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    msgs = [
+        tagged(f"a{i}", "a", "Kappa", "25:0-4", base + timedelta(seconds=i)) for i in range(4)
+    ] + [
+        tagged(f"b{i}", "a", "Keepo", "1902:0-4", base + timedelta(seconds=10 + i)) for i in range(2)
+    ]
+    msgs.append(tagged("c0", "b", "Kappa", "25:0-4", base + timedelta(minutes=5)))
+    df = cs.messages_to_frame(msgs)
+    stats = cs.compute_stats(df, make_params(), {})
+    assert stats["emote_diversity"] == [
+        {
+            "user_id": "a",
+            "username": "a",
+            "total_emote_uses": 6,
+            "unique_emotes": 2,
+            "diversity_ratio": round(2 / 6, 4),
+        }
+    ]
+
+
+def test_non_ascii_ratio():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "hello", base),
+        ("b", "zażółć", base + timedelta(minutes=1)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["messages_with_non_ascii"] == 1
+    assert stats["non_ascii_ratio"] == round(4 / 11, 4)
+
+
+def test_first_message_hours():
+    rows = [
+        ("a", "morning", datetime(2024, 1, 15, 10, 5, tzinfo=UTC)),
+        ("a", "again", datetime(2024, 1, 15, 11, 0, tzinfo=UTC)),
+        ("b", "night", datetime(2024, 1, 15, 23, 30, tzinfo=UTC)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    hours = stats["first_message_hours"]
+    assert len(hours) == 24
+    assert hours[10] == 1
+    assert hours[23] == 1
+    assert sum(hours) == 2
+
+
+def test_session_distribution_and_chatter_p99():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "one", base),
+        ("a", "two", base + timedelta(minutes=5)),
+        ("a", "later", base + timedelta(hours=2)),
+        ("b", "solo", base + timedelta(minutes=30)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    sessions = stats["sessions"]
+    assert sessions["total_sessions"] == 3
+    assert sessions["median_session_minutes"] == 0.0
+    # Nearest-rank quantile (same convention as chatter quantiles).
+    assert sessions["p90_session_minutes"] == 5.0
+    assert stats["chatter_message_quantiles"]["p99"] == 3.0
+
+
+def _mention_frame(rows: list[tuple[str, str, datetime]]) -> dict:
+    return cs.compute_stats(make_frame(rows), make_params(include_mention_graph=True), {})
+
+
+def test_mention_graph_full_join_symmetric():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("A", "@Bob hello", base),
+        ("A", "@Bob again", base + timedelta(minutes=1)),
+        ("B", "nothing here", base + timedelta(minutes=2)),
+        ("C", "@Alice yo", base + timedelta(minutes=3)),
+    ]
+    stats = _mention_frame(rows)
+    # Source-only and target-only users get 0 (not null) on the missing side.
+    assert stats["mention_graph"] == [
+        {"username": "a", "mentions_in": 0, "mentions_out": 2, "degree": 2},
+        {"username": "bob", "mentions_in": 2, "mentions_out": 0, "degree": 2},
+        {"username": "alice", "mentions_in": 1, "mentions_out": 0, "degree": 1},
+        {"username": "c", "mentions_in": 0, "mentions_out": 1, "degree": 1},
+    ]
+
+
+def test_mutual_mentions_keeps_one_direction():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "@b one", base),
+        ("a", "@b two", base + timedelta(minutes=1)),
+        ("b", "@a hey", base + timedelta(minutes=2)),
+        ("c", "@d solo", base + timedelta(minutes=3)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_mutual_mentions=True), {})
+    assert stats["mutual_mention_pairs"] == [
+        {"user_a": "a", "user_b": "b", "count_ab": 2, "count_ba": 1, "total": 3}
+    ]
+
+
+def test_self_mention_excluded_from_top_but_counted():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "@a talking to myself", base),
+        ("b", "hi @a", base + timedelta(minutes=1)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["messages_with_mentions"] == 2
+    assert stats["top_mentions"] == [{"username": "a", "count": 1}]
+    assert stats["top_mention_pairs"] == [{"from_user": "b", "to_user": "a", "count": 1}]
+
+
+def test_emote_centrality_counts_distinct_partners():
+    def tagged(mid: str, text: str, tag: str, ts: datetime) -> FullMessage:
+        return FullMessage(
+            type=1, text=text, displayName="a", timestamp=ts, id=mid,
+            tags={"emotes": tag}, username="a", channel="chan", raw=text,
+        )
+
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    msgs = [
+        tagged("m1", "Kappa Keepo", "25:0-4/1902:6-10", base),
+        tagged("m2", "Kappa Keepo", "25:0-4/1902:6-10", base + timedelta(minutes=1)),
+    ]
+    stats = cs.compute_stats(
+        cs.messages_to_frame(msgs), make_params(include_emote_centrality=True), {}
+    )
+    # Degree (distinct partners), not co-occurrence count.
+    assert stats["emote_centrality"] == [
+        {"emote": "Kappa", "distinct_co_occurrences": 1},
+        {"emote": "Keepo", "distinct_co_occurrences": 1},
+    ]
+
+
+def test_emote_entropy_uniform_vs_dominated():
+    def tagged(mid: str, text: str, tag: str, ts: datetime) -> FullMessage:
+        return FullMessage(
+            type=1, text=text, displayName="a", timestamp=ts, id=mid,
+            tags={"emotes": tag}, username="a", channel="chan", raw=text,
+        )
+
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    msgs = []
+    for i, (text, tag) in enumerate(
+        [("Kappa", "25:0-4"), ("Keepo", "1902:0-4"), ("LUL", "425671:0-2"), ("OMEGALUL", "123:0-7")]
+    ):
+        msgs += [tagged(f"u{i}a", text, tag, base + timedelta(seconds=2 * i))]
+        msgs += [tagged(f"u{i}b", text, tag, base + timedelta(seconds=2 * i + 1))]
+    stats = cs.compute_stats(
+        cs.messages_to_frame(msgs), make_params(include_emote_entropy=True), {}
+    )
+    assert stats["emote_entropy"] == 2.0
+
+    dom = cs.messages_to_frame(
+        [tagged(f"d{i}", "Kappa", "25:0-4", base + timedelta(seconds=i)) for i in range(8)]
+    )
+    stats_dom = cs.compute_stats(dom, make_params(include_emote_entropy=True), {})
+    assert stats_dom["emote_entropy"] == 0.0
+
+
+def test_lorenz_samples():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [("a", f"msg {i}", base + timedelta(minutes=i)) for i in range(10)]
+    rows += [("b", "one", base), ("c", "one", base), ("d", "one", base), ("e", "one", base)]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_lorenz=True), {})
+    assert stats["lorenz_samples"] == [
+        {"top_pct": 1.0, "message_share_pct": round(10 / 14 * 100, 2)},
+        {"top_pct": 5.0, "message_share_pct": round(10 / 14 * 100, 2)},
+        {"top_pct": 10.0, "message_share_pct": round(10 / 14 * 100, 2)},
+        {"top_pct": 25.0, "message_share_pct": round(11 / 14 * 100, 2)},
+        {"top_pct": 50.0, "message_share_pct": round(12 / 14 * 100, 2)},
+    ]
+
+
+def test_bot_scores_flag_regular_spammer():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [("bot", "status ok", base + timedelta(seconds=10 * i)) for i in range(50)]
+    rows += [
+        ("human", "what a great stream today", base),
+        ("human", "that play was insane", base + timedelta(minutes=37)),
+        ("human", "ggs everyone", base + timedelta(hours=2)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_bot_scores=True), {})
+    assert stats["bot_likelihood"] == [
+        {
+            "user_id": "bot",
+            "username": "bot",
+            "score": 0.8,
+            "signals": ["regular_interval", "low_diversity"],
+        }
+    ]
+
+
+def test_length_trend_slope():
+    rows = [
+        ("a", "a" * 10, datetime(2024, 1, 15, 10, 0, tzinfo=UTC)),
+        ("a", "a" * 20, datetime(2024, 1, 16, 10, 0, tzinfo=UTC)),
+        ("a", "a" * 30, datetime(2024, 1, 17, 10, 0, tzinfo=UTC)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_length_trend=True), {})
+    assert stats["message_length_trend_slope"] == 10.0
+
+
+def test_cohort_retention_week_alignment():
+    # 2024-01-15 is a Monday. A active weeks 0 and 2, B only week 0.
+    rows = [
+        ("a", "first", datetime(2024, 1, 15, 10, 0, tzinfo=UTC)),
+        ("a", "back", datetime(2024, 1, 29, 10, 0, tzinfo=UTC)),
+        ("b", "once", datetime(2024, 1, 15, 11, 0, tzinfo=UTC)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_cohort_retention=True), {})
+    assert stats["cohort_retention"] == [
+        {
+            "cohort_week": "2024-01-15",
+            "cohort_size": 2,
+            "retention": [
+                {"week_offset": 0, "retention_pct": 100.0},
+                {"week_offset": 2, "retention_pct": 50.0},
+            ],
+        }
+    ]
+
+
+def test_cohort_retention_caps_output():
+    # 10 weekly Monday cohorts → only the most recent 8 are returned.
+    rows = [
+        (f"u{i}", "hello", datetime(2024, 1, 1, 10, 0, tzinfo=UTC) + timedelta(weeks=i))
+        for i in range(10)
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_cohort_retention=True), {})
+    cohorts = stats["cohort_retention"]
+    assert len(cohorts) == 8
+    assert cohorts[0]["cohort_week"] == "2024-01-15"
+    assert all(c["retention"] == [{"week_offset": 0, "retention_pct": 100.0}] for c in cohorts)
+
+
+def test_language_by_day_partitions_days(monkeypatch):
+    import sys
+    import types
+
+    fake = types.ModuleType("langdetect")
+    fake_exc = types.ModuleType("langdetect.lang_detect_exception")
+
+    class LangDetectException(Exception):
+        pass
+
+    class DetectorFactory:
+        seed = 0
+
+    def detect(text: str) -> str:
+        if "boom" in text:
+            raise ValueError("unclassifiable")
+        return "fr" if "bonjour" in text else "en"
+
+    fake.DetectorFactory = DetectorFactory
+    fake.detect = detect
+    fake_exc.LangDetectException = LangDetectException
+    monkeypatch.setitem(sys.modules, "langdetect", fake)
+    monkeypatch.setitem(sys.modules, "langdetect.lang_detect_exception", fake_exc)
+
+    rows = [
+        ("a", "bonjour monde ami camarade copain", datetime(2024, 1, 15, 10, 0, tzinfo=UTC)),
+        ("b", "bonjour tout le monde les amis", datetime(2024, 1, 15, 11, 0, tzinfo=UTC)),
+        ("c", "hello world friend fellow buddy", datetime(2024, 1, 16, 10, 0, tzinfo=UTC)),
+        ("d", "boom", datetime(2024, 1, 16, 11, 0, tzinfo=UTC)),
+    ]
+    params = make_params(include_language=True, include_language_by_day=True)
+    out = cs.compute_stats(make_frame(rows), params, {})["language_by_day"]
+    assert [(entry["date"], entry["language"]) for entry in out] == [
+        ("2024-01-15", "fr"),
+        ("2024-01-16", "en"),
+    ]
+
+
+def test_language_by_day_reseed_is_stable(monkeypatch):
+    """Day N's sample must not depend on how many messages earlier days had."""
+    import sys
+    import types
+
+    fake = types.ModuleType("langdetect")
+    fake_exc = types.ModuleType("langdetect.lang_detect_exception")
+
+    class LangDetectException(Exception):
+        pass
+
+    class DetectorFactory:
+        seed = 0
+
+    def detect(text: str) -> str:
+        return "fr" if "bonjour" in text else "en"
+
+    fake.DetectorFactory = DetectorFactory
+    fake.detect = detect
+    fake_exc.LangDetectException = LangDetectException
+    monkeypatch.setitem(sys.modules, "langdetect", fake)
+    monkeypatch.setitem(sys.modules, "langdetect.lang_detect_exception", fake_exc)
+
+    day2 = datetime(2024, 1, 16, 10, 0, tzinfo=UTC)
+    late_rows = [("u", "hello world friend fellow buddy", day2 + timedelta(seconds=i)) for i in range(1000)]
+    late_rows += [("u", "bonjour monde ami camarade copain", day2 + timedelta(seconds=2000 + i)) for i in range(5)]
+    params = make_params(include_language=True, include_language_by_day=True)
+
+    day1 = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    early_rows = [("u", "hello world friend fellow buddy", day1 + timedelta(seconds=i)) for i in range(1005)]
+
+    with_both = cs.compute_stats(make_frame(early_rows + late_rows), params, {})["language_by_day"]
+    late_only = cs.compute_stats(make_frame(late_rows), params, {})["language_by_day"]
+    assert [e for e in with_both if e["date"] == "2024-01-16"] == late_only
+
+
+def test_message_classes_single_pass_matches_expected():
+    from app.scripts.chat_stats import _compute_message_classes, _parse_twitch_emotes
+
+    df = pl.DataFrame({
+        "text": ["hi", "Hello?", "LOUD NOISES", "!", "Kappa", "Kappa Kappa", "a" * 250, "x"],
+        "emotes_tag": ["", "", "", "", "25:0-4", "25:0-4/25:6-10", "", ""],
+    })
+    twitch_emotes = _parse_twitch_emotes(df)
+    result = _compute_message_classes(df, twitch_emotes, {})["message_classes"]
+    assert result["questions"] == 1  # "Hello?"
+    assert result["exclamations"] == 1  # "!"
+    assert result["short_messages"] == 3  # "hi", "!", "x"
+    assert result["long_messages"] == 1  # 250-char
+    assert result["emote_only"] == 2  # "Kappa", "Kappa Kappa"
+
+
+def test_poisson_upper_tail_known_value():
+    # Poisson(10): P(X>=20) ≈ 0.0035, P(X>=21) ≈ 0.0016 (standard tables).
+    p = cs._poisson_upper_tail(20, 10.0)
+    assert abs(p - 0.0035) < 1e-4
+    assert abs(cs._poisson_upper_tail(21, 10.0) - 0.0016) < 1e-4
+    assert cs._poisson_upper_tail(0, 10.0) == 1.0
+    assert cs._poisson_lower_tail(-1, 10.0) == 0.0
+    # Degenerate lambda: all mass at 0.
+    assert cs._poisson_upper_tail(1, 0.0) == 0.0
+    assert cs._poisson_lower_tail(0, 0.0) == 1.0
+    # Symmetric sanity: P(X<=10) + P(X>=11) == 1 for λ=10.
+    lo = cs._poisson_lower_tail(10, 10.0)
+    hi = cs._poisson_upper_tail(11, 10.0)
+    assert abs(lo + hi - 1.0) < 1e-9
+
+
+def test_weekly_seasonality_mean_is_one():
+    base = datetime(2024, 1, 15, tzinfo=UTC)  # a Monday
+    mpd = [
+        {"date": (base + timedelta(days=i)).date().isoformat(), "count": 30 if (base + timedelta(days=i)).weekday() == 5 else 10}
+        for i in range(14)
+    ]
+    trend, seasonality = cs._decompose_weekly_seasonality(mpd)
+    assert seasonality is not None
+    assert len(seasonality) == 7
+    assert abs(sum(seasonality) / 7 - 1.0) < 1e-9
+    assert seasonality[5] > 1.0  # Saturday runs hot
+    assert len(trend) == 14
+    assert cs._decompose_weekly_seasonality(mpd[:3]) == ([], None)
+
+
+def test_quote_reply_window_boundary():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("bob", "im here", base),
+        ("a", "@bob hi", base + timedelta(seconds=299)),
+        ("a", "@bob late", base + timedelta(seconds=301)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_quote_replies=True), {})
+    assert stats["quote_reply_count"] == 1
+    assert stats["quote_reply_pairs"] == [{"from_user": "a", "to_user": "bob", "count": 1}]
+
+
+def test_zipf_slope_on_power_law():
+    # Word i occurs ~(30/(i+1)) times: Zipf with slope ≈ -1 by construction.
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = []
+    minute = 0
+    for i in range(15):
+        count = max(2, round(30 / (i + 1)))
+        for _ in range(count):
+            rows.append(("a", f"w{i:02d}", base + timedelta(minutes=minute)))
+            minute += 1
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    assert stats["hapax_ratio"] == 0.0
+    assert abs(stats["zipf_slope"] + 1.0) < 0.2

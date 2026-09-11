@@ -135,7 +135,12 @@
 		probing = true;
 		probe = '';
 		try {
-			probe = JSON.stringify(await invoke('probe_backend'), null, 2);
+			const info = await invoke<{
+				configured: boolean;
+				port: number | null;
+				diagnostics: { rust_health: string; rust_scripts: string } | null;
+			}>('get_backend', { diagnostic: true });
+			probe = JSON.stringify(info, null, 2);
 		} catch (e) {
 			probe = `probe invoke failed: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {

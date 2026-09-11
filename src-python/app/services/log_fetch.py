@@ -47,6 +47,9 @@ CONCURRENCY = 5  # max simultaneous page requests (after slow-start ramp-up)
 # per page before giving up (also correct behaviour for 429s).
 RETRY_BACKOFF_BASE_S = 1.0
 RETRY_BACKOFF_CAP_S = 16.0
+# Each split halves the time span. With a 30-day span and depth 8, the
+# smallest recursive unit is ~2.8 hours; the recursion is bounded so a
+# pathological upstream can't drive it to infinite depth.
 MAX_SPLIT_DEPTH = 8  # time-split recursion cap for deep-offset refusals
 
 # Upstream uses 429 for rate limiting; 502/503/504 (and network errors,

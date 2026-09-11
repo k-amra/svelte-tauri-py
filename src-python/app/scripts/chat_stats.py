@@ -207,6 +207,15 @@ MIN_ALPHA_CHARS_FOR_LANG = 10
 LANG_SAMPLE_SIZE = 1000
 MIN_ALPHA_FOR_CAPS = 5
 MAX_ANOMALIES = 50
+WORDS_ZIPF_MAX_RANK = 1000  # Zipf tail deviates; fit the head only
+POISSON_NORMAL_APPROX_LAMBDA = 30.0
+REPLY_WINDOW_S = 300  # quote-reply recency window (5 minutes)
+REPLY_TOP_N = 15
+MIN_PLAUSIBLE_AVG_MESSAGE_LEN = 3.0
+MAX_PLAUSIBLE_AVG_MESSAGE_LEN = 400.0
+COPY_PASTE_MIN_OCCURRENCES = 3
+COPY_PASTE_WINDOW_S = 60
+COPY_PASTE_TOP_N = 10
 
 # --- Pydantic Models ---
 
@@ -237,6 +246,19 @@ class Params(BaseModel):
     include_engagement: bool = True
     include_anomalies: bool = True
     include_language: bool = False
+    include_copy_paste_chains: bool = True
+
+    # Tier 2 toggles — default off.
+    include_mention_graph: bool = False
+    include_mutual_mentions: bool = False
+    include_emote_centrality: bool = False
+    include_emote_entropy: bool = False
+    include_lorenz: bool = False
+    include_bot_scores: bool = False
+    include_length_trend: bool = False
+    include_cohort_retention: bool = False
+    include_language_by_day: bool = False
+    include_quote_replies: bool = False
 
     session_gap_minutes: int = Field(15, ge=2, le=120)
     anomaly_sigma: float = Field(3.0, ge=1.0, le=6.0)
@@ -277,6 +299,11 @@ class DayCount(BaseModel):
     count: int
 
 
+class TrendPoint(BaseModel):
+    date: str
+    count: float
+
+
 class WordCount(BaseModel):
     word: str
     count: int
@@ -315,6 +342,54 @@ class MentionPair(BaseModel):
     count: int
 
 
+class MentionDegree(BaseModel):
+    username: str
+    mentions_in: int
+    mentions_out: int
+    degree: int
+
+
+class MutualMentionPair(BaseModel):
+    user_a: str
+    user_b: str
+    count_ab: int
+    count_ba: int
+    total: int
+
+
+class EmoteCentrality(BaseModel):
+    emote: str
+    distinct_co_occurrences: int
+
+
+class LorenzSample(BaseModel):
+    top_pct: float
+    message_share_pct: float
+
+
+class BotScore(BaseModel):
+    user_id: str
+    username: str
+    score: float
+    signals: list[str]
+
+
+class CohortCell(BaseModel):
+    week_offset: int
+    retention_pct: float
+
+
+class CohortRow(BaseModel):
+    cohort_week: str
+    cohort_size: int
+    retention: list[CohortCell]
+
+
+class DayLanguage(BaseModel):
+    date: str
+    language: str
+    percentage: float
+
 class RepeatedMessage(BaseModel):
     text: str
     count: int
@@ -331,6 +406,8 @@ class SessionStats(BaseModel):
     avg_messages_per_session: float | None = None
     avg_session_minutes: float | None = None
     longest_session_minutes: float | None = None
+    median_session_minutes: float | None = None
+    p90_session_minutes: float | None = None
 
 
 class Concentration(BaseModel):
@@ -371,6 +448,7 @@ class ChatterDist(BaseModel):
     p75: float | None = None
     p90: float | None = None
     p95: float | None = None
+    p99: float | None = None
 
 
 class ActivityPerDayStats(BaseModel):
@@ -387,6 +465,27 @@ class AnomalyStat(BaseModel):
     window_start: str
     message_count: int
     z_score: float
+    p_value: float
+
+
+class QuoteReplyPair(BaseModel):
+    from_user: str
+    to_user: str
+    count: int
+
+
+class EmoteDiversityStat(BaseModel):
+    user_id: str
+    username: str
+    total_emote_uses: int
+    unique_emotes: int
+    diversity_ratio: float
+
+
+class CopyPasteChain(BaseModel):
+    text: str
+    occurrences: int
+    distinct_users: int
 
 
 class Result(BaseModel):
@@ -405,6 +504,8 @@ class Result(BaseModel):
     top_chatters: list[TopChatterStat]
     activity_by_hour: list[int]
     activity_by_weekday_hour: list[list[int]]
+    # One entry per calendar day in the requested range. Bounded by
+    # Params.max_range_days (default 366).
     messages_per_day: list[DayCount]
     top_words: list[WordCount]
     top_emotes: list[EmoteCount]
@@ -434,10 +535,48 @@ class Result(BaseModel):
     chatter_message_quantiles: ChatterDist = Field(default_factory=ChatterDist)
     activity_per_day_stats: ActivityPerDayStats = Field(default_factory=ActivityPerDayStats)
 
+    # Per-day arrays like messages_per_day above — same max_range_days bound.
     daily_new_chatters: list[DayCount] = []
     daily_returning_chatters: list[DayCount] = []
     language_breakdown: list[LanguageBreakdown] = []
     anomalies_5m: list[AnomalyStat] = []
+
+    # Tier 1 additions — all defaulted so payloads stay backwards-compatible.
+    # TTR (vocab_richness) is length-dependent: longer ranges read lower.
+    peak_concurrent_chatters: int | None = None
+    peak_concurrent_window: str | None = None
+    vocab_richness: float | None = None
+    unique_word_count: int = 0
+    self_repetition_count: int = 0
+    self_repetition_pct: float | None = None
+    # Event count (inter-user handoffs) vs distinct texts with >= 1 event.
+    cross_user_copy_paste_count: int = 0
+    cross_user_copy_paste_texts: int = 0
+    top_copy_paste_chains: list[CopyPasteChain] = []
+    non_ascii_ratio: float | None = None
+    messages_with_non_ascii: int = 0
+    emote_diversity: list[EmoteDiversityStat] = []
+    first_message_hours: list[int] = Field(default_factory=lambda: [0] * 24)
+
+    # Tier 2 additions — all defaulted.
+    mention_graph: list[MentionDegree] = []
+    mutual_mention_pairs: list[MutualMentionPair] = []
+    emote_centrality: list[EmoteCentrality] = []
+    lorenz_samples: list[LorenzSample] = []
+    emote_entropy: float | None = None
+    bot_likelihood: list[BotScore] = []
+    message_length_trend_slope: float | None = None
+    cohort_retention: list[CohortRow] = []
+    language_by_day: list[DayLanguage] = []
+
+    # Tier 3 refinements (all defaulted).
+    hapax_ratio: float | None = None
+    zipf_slope: float | None = None
+    trend_by_day: list[TrendPoint] = []
+    weekly_seasonality: list[float] | None = None
+    quote_reply_count: int = 0
+    quote_reply_pairs: list[QuoteReplyPair] = []
+    warnings: list[str] = []
 
 
 # --- Helpers ---
@@ -705,6 +844,7 @@ def _compute_chatter_dist(df: pl.DataFrame) -> dict:
             "p75": safe_q(0.75),
             "p90": safe_q(0.90),
             "p95": safe_q(0.95),
+            "p99": safe_q(0.99),
         }
     }
 
@@ -721,6 +861,46 @@ def _compute_activity_per_day(df: pl.DataFrame) -> dict:
             "peak_active_chatters": int(peak_active) if peak_active is not None else None,
         }
     }
+
+
+def _decompose_weekly_seasonality(
+    messages_per_day: list[dict],
+) -> tuple[list[dict], list[float] | None]:
+    """Split messages_per_day into (trend, weekday_index).
+
+    Trend is a 7-day centered moving average. weekday_index is the ratio
+    actual/trend averaged per weekday (Mon..Sun), normalized so its mean
+    is 1.0. Returns ([], None) for ranges shorter than 7 days.
+    """
+    if len(messages_per_day) < 7:
+        return [], None
+
+    counts = [int(d["count"]) for d in messages_per_day]
+    n = len(counts)
+    half = 3
+
+    trend: list[dict] = []
+    for i, d in enumerate(messages_per_day):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        window = counts[lo:hi]
+        trend.append({"date": d["date"], "count": round(sum(window) / len(window), 2)})
+
+    per_weekday: dict[int, list[float]] = {i: [] for i in range(7)}
+    for i, d in enumerate(messages_per_day):
+        t = trend[i]["count"]
+        if t <= 0:
+            continue
+        # Python weekday(): Mon=0..Sun=6, matching WEEKDAY_LABELS on the frontend.
+        wd = datetime.fromisoformat(d["date"]).weekday()
+        per_weekday[wd].append(counts[i] / t)
+
+    means = [sum(vs) / len(vs) if vs else 1.0 for vs in per_weekday.values()]
+    overall = sum(means) / 7 if any(means) else 1.0
+    if overall == 0:
+        return trend, None
+    seasonality = [round(m / overall, 4) for m in means]
+    return trend, seasonality
 
 
 def _compute_time(df: pl.DataFrame) -> dict:
@@ -752,27 +932,43 @@ def _compute_time(df: pl.DataFrame) -> dict:
         ]
 
     top_peaks: list[dict] = []
+    peak_concurrent: int | None = None
+    peak_concurrent_window: str | None = None
     # group_by_dynamic handles a single row fine; no need for a >=2 gate.
     if df.height >= 1:
-        p = (
-            df.group_by_dynamic("ts", every="5m", period="5m", start_by="window", closed="left")
-            .agg(pl.len())
-            .sort("len", descending=True)
-            .head(3)
+        binned = (
+            df.group_by_dynamic("ts", every="5m", period="5m", start_by="window", closed="left").agg(
+                pl.len().alias("n"),
+                pl.col("user_id").n_unique().alias("unique_chatters"),
+            )
         )
+        # Peak messages (existing) — top 3.
+        p = binned.sort("n", descending=True).head(3)
         for r in p.iter_rows(named=True):
             top_peaks.append(
                 {
                     "window_start": r["ts"].isoformat(),
-                    "message_count": int(r["len"]),
+                    "message_count": int(r["n"]),
                 }
             )
+        # Peak concurrency (new) — single row out of the same bins.
+        top_conc = binned.sort("unique_chatters", descending=True).head(1)
+        if not top_conc.is_empty():
+            r = top_conc.row(0, named=True)
+            peak_concurrent = int(r["unique_chatters"])
+            peak_concurrent_window = r["ts"].isoformat()
+
+    trend_by_day, weekly_seasonality = _decompose_weekly_seasonality(messages_per_day)
 
     return {
         "activity_by_hour": hourly,
         "activity_by_weekday_hour": heatmap,
         "messages_per_day": messages_per_day,
         "top_peaks_5m": top_peaks,
+        "peak_concurrent_chatters": peak_concurrent,
+        "peak_concurrent_window": peak_concurrent_window,
+        "trend_by_day": trend_by_day,
+        "weekly_seasonality": weekly_seasonality,
     }
 
 
@@ -819,60 +1015,147 @@ def _count_emotes(
     return [{"name": n, "count": c} for n, c in top_emotes], seen_names
 
 
-def _compute_emote_pairs(twitch_emotes: pl.Series, limit: int) -> list[dict]:
-    """All unique unordered emote pairs co-occurring within a single message.
-
-    Uses a self-join on message id after exploding — one Polars pass, no
-    Python per-message loops. Messages with very many distinct emotes are
-    dropped to avoid O(k^2) blowups on copypasta/spam.
-    """
+def _emote_pairs_frame(twitch_emotes: pl.Series) -> pl.DataFrame:
+    """All unique within-message emote pairs (message-bounded, deduped)."""
     if len(twitch_emotes) == 0:
-        return []
-
-    edf = pl.DataFrame(
-        {
-            "msg_id": list(range(len(twitch_emotes))),
-            "emotes": twitch_emotes,
-        }
+        return pl.DataFrame({"emotes": [], "emotes_2": []})
+    edf = pl.DataFrame({"msg_id": list(range(len(twitch_emotes))), "emotes": twitch_emotes})
+    edf = edf.filter(pl.col("emotes").list.len() >= 2).with_columns(
+        pl.col("emotes").list.unique().alias("emotes")
     )
-    edf = edf.filter(pl.col("emotes").list.len() >= 2)
+    edf = edf.filter(
+        (pl.col("emotes").list.len() >= 2) & (pl.col("emotes").list.len() <= MAX_EMOTES_PER_MSG)
+    )
     if edf.is_empty():
-        return []
-
-    # Deduplicate within a message so "Kappa Kappa Kappa" counts as {Kappa}.
-    edf = edf.with_columns(pl.col("emotes").list.unique().alias("emotes"))
-    edf = edf.filter((pl.col("emotes").list.len() >= 2) & (pl.col("emotes").list.len() <= MAX_EMOTES_PER_MSG))
-    if edf.is_empty():
-        return []
-
-    exploded = edf.explode("emotes")
-    pairs = (
+        return pl.DataFrame({"emotes": [], "emotes_2": []})
+    exploded = edf.explode("emotes", empty_as_null=True)
+    return (
         exploded.join(exploded, on="msg_id", suffix="_2")
         .filter(pl.col("emotes") < pl.col("emotes_2"))
-        .group_by("emotes", "emotes_2")
-        .len()
-        .sort("len", descending=True)
-        .head(limit)
+        .select("emotes", "emotes_2")
     )
 
+
+def _compute_emote_pairs(pairs: pl.DataFrame, limit: int) -> list[dict]:
+    """All unique unordered emote pairs co-occurring within a single message.
+
+    Takes the pre-built pairs frame (see _emote_pairs_frame): one Polars
+    pass in the caller, no Python per-message loops here.
+    """
+    if pairs.is_empty():
+        return []
+    top = pairs.group_by("emotes", "emotes_2").len().sort("len", descending=True).head(limit)
     return [
         {"emote1": a, "emote2": b, "count": int(c)}
-        for a, b, c in zip(pairs["emotes"], pairs["emotes_2"], pairs["len"], strict=True)
+        for a, b, c in zip(top["emotes"], top["emotes_2"], top["len"], strict=True)
     ]
 
 
+def _compute_emote_centrality(pairs: pl.DataFrame, top_n: int) -> dict:
+    """Degree centrality over the shared emote-pairs frame.
+
+    Frequency tells you what's popular; centrality tells you what connects
+    different emote clusters. Uses the pre-truncation frame so rare
+    co-occurrences still count.
+    """
+    if pairs.is_empty():
+        return {"emote_centrality": []}
+
+    both = pl.concat(
+        [
+            pairs.select(pl.col("emotes").alias("e"), pl.col("emotes_2").alias("other")),
+            pairs.select(pl.col("emotes_2").alias("e"), pl.col("emotes").alias("other")),
+        ]
+    )
+    centrality = (
+        both.group_by("e")
+        .agg(pl.col("other").n_unique().alias("distinct_co_occurrences"))
+        .sort(["distinct_co_occurrences", "e"], descending=[True, False])
+        .head(top_n)
+    )
+
+    return {
+        "emote_centrality": [
+            {"emote": r["e"], "distinct_co_occurrences": int(r["distinct_co_occurrences"])}
+            for r in centrality.iter_rows(named=True)
+        ]
+    }
+
+
+def _compute_emote_entropy(twitch_emotes: pl.Series) -> dict:
+    """Shannon entropy (bits) over the Twitch emote frequency distribution.
+
+    0.0 means a single emote dominates; None means there are no emote uses
+    at all to measure.
+    """
+    if len(twitch_emotes) == 0:
+        return {"emote_entropy": None}
+    exploded = pl.DataFrame({"e": twitch_emotes}).explode("e", empty_as_null=True).drop_nulls("e")
+    if exploded.is_empty():
+        return {"emote_entropy": None}
+    counts = exploded.group_by("e").len()["len"].to_list()
+    total = sum(counts)
+    if total == 0:
+        return {"emote_entropy": None}
+    if len(counts) < 2:
+        return {"emote_entropy": 0.0}
+    h = -sum((c / total) * math.log2(c / total) for c in counts if c > 0)
+    return {"emote_entropy": round(h, 4)}
+
+
 def _compute_words(df: pl.DataFrame, stopwords: frozenset[str], limit: int) -> dict:
+    """Top words, type-token ratio, hapax ratio, and Zipf slope.
+
+    NOTE: TTR (vocab_richness) and hapax_ratio are length-dependent —
+    longer ranges read lower. Compare only across similar spans.
+    """
     words = (
         df.select(_clean_text_expr().str.extract_all(WORD_RE).alias("w"))
         .explode("w", empty_as_null=True)
         .drop_nulls("w")
         .filter(~pl.col("w").is_in(list(stopwords)))
-        .group_by("w")
-        .len()
-        .sort(["len", "w"], descending=[True, False])
-        .head(limit)
     )
-    return {"top_words": [{"word": w, "count": c} for w, c in zip(words["w"], words["len"], strict=True)]}
+
+    if words.is_empty():
+        return {
+            "top_words": [],
+            "vocab_richness": None,
+            "unique_word_count": 0,
+            "hapax_ratio": None,
+            "zipf_slope": None,
+        }
+
+    counts = words.group_by("w").len().sort(["len", "w"], descending=[True, False])
+
+    total = int(counts["len"].sum())
+    unique = counts.height
+    hapax = int((counts["len"] == 1).sum())
+
+    # Zipf: fit log(freq) ~ slope * log(rank) over the head.
+    # Slope ~-1.0 is textbook Zipfian; real chat usually lands -0.7..-1.1.
+    head = counts.head(WORDS_ZIPF_MAX_RANK)
+    if head.height >= 10:
+        freqs = head["len"].to_list()
+        xs = [math.log(i + 1) for i in range(len(freqs))]  # 1-indexed rank
+        ys = [math.log(f) for f in freqs]
+        n = len(xs)
+        sx, sy = sum(xs), sum(ys)
+        sxy = sum(x * y for x, y in zip(xs, ys, strict=True))
+        sxx = sum(x * x for x in xs)
+        denom = n * sxx - sx * sx
+        zipf_slope: float | None = round((n * sxy - sx * sy) / denom, 4) if denom else None
+    else:
+        zipf_slope = None
+
+    top = counts.head(limit)
+
+    return {
+        "top_words": [{"word": w, "count": c} for w, c in zip(top["w"], top["len"], strict=True)],
+        "vocab_richness": round(unique / total, 4) if total else None,
+        "unique_word_count": int(unique),
+        "hapax_ratio": round(hapax / unique, 4) if unique else None,
+        "zipf_slope": zipf_slope,
+    }
 
 
 def _compute_commands(df: pl.DataFrame, top_n: int) -> dict:
@@ -959,7 +1242,12 @@ def _compute_links(df: pl.DataFrame, top_n: int) -> dict:
     }
 
 
-def _compute_mentions(df: pl.DataFrame, top_n: int) -> dict:
+def _mention_pairs_frame(df: pl.DataFrame) -> pl.DataFrame:
+    """Exploded (from_user, to_user) mention edges, self-mentions dropped.
+
+    Shared by _compute_mentions, _compute_mention_graph and
+    _compute_mutual_mentions so the text column is only exploded once.
+    """
     mentions_raw = (
         df.select(
             pl.col("username").str.to_lowercase().alias("from_user"),
@@ -968,23 +1256,26 @@ def _compute_mentions(df: pl.DataFrame, top_n: int) -> dict:
         .explode("mentions_raw", empty_as_null=True)
         .drop_nulls("mentions_raw")
     )
+    return (
+        mentions_raw.with_columns(
+            pl.col("mentions_raw").str.slice(1).str.to_lowercase().alias("to_user")
+        )
+        .drop_nulls("to_user")
+        .filter(pl.col("from_user") != pl.col("to_user"))
+        .select("from_user", "to_user")
+    )
 
-    mentions_df = mentions_raw.with_columns(
-        pl.col("mentions_raw").str.slice(1).str.to_lowercase().alias("mentions")
-    ).drop_nulls("mentions")
 
+def _compute_mentions(df: pl.DataFrame, top_n: int, pairs: pl.DataFrame) -> dict:
     messages_with_mentions = df.filter(pl.col("text").str.contains(MENTION_RE)).height
+    if pairs.is_empty():
+        return {"messages_with_mentions": messages_with_mentions, "top_mentions": [], "top_mention_pairs": []}
 
     top_mens = (
-        mentions_df.select(pl.col("mentions").alias("user"))
-        .group_by("user")
+        pairs.group_by(pl.col("to_user").alias("user"))
         .len()
         .sort(["len", "user"], descending=[True, False])
         .head(top_n)
-    )
-
-    pairs = mentions_df.select(pl.col("from_user"), pl.col("mentions").alias("to_user")).filter(
-        pl.col("from_user") != pl.col("to_user")
     )
     top_pairs = (
         pairs.group_by("from_user", "to_user")
@@ -992,7 +1283,6 @@ def _compute_mentions(df: pl.DataFrame, top_n: int) -> dict:
         .sort(["len", "from_user", "to_user"], descending=[True, False, False])
         .head(top_n)
     )
-
     return {
         "messages_with_mentions": messages_with_mentions,
         "top_mentions": [{"username": u, "count": c} for u, c in zip(top_mens["user"], top_mens["len"], strict=True)],
@@ -1000,6 +1290,142 @@ def _compute_mentions(df: pl.DataFrame, top_n: int) -> dict:
             {"from_user": f, "to_user": t, "count": c}
             for f, t, c in zip(top_pairs["from_user"], top_pairs["to_user"], top_pairs["len"], strict=True)
         ],
+    }
+
+
+def _compute_mention_graph(pairs: pl.DataFrame, top_n: int) -> dict:
+    """Directed in/out degree plus total, over the shared mention edges."""
+    if pairs.is_empty():
+        return {"mention_graph": []}
+
+    out_deg = pairs.group_by(pl.col("from_user").alias("username")).len().rename({"len": "mentions_out"})
+    in_deg = pairs.group_by(pl.col("to_user").alias("username")).len().rename({"len": "mentions_in"})
+
+    graph = (
+        out_deg.join(in_deg, on="username", how="full", coalesce=True)
+        .with_columns(
+            [
+                pl.col("mentions_in").fill_null(0),
+                pl.col("mentions_out").fill_null(0),
+            ]
+        )
+        .with_columns((pl.col("mentions_in") + pl.col("mentions_out")).alias("degree"))
+        .sort(["degree", "username"], descending=[True, False])
+        .head(top_n)
+    )
+
+    return {
+        "mention_graph": [
+            {
+                "username": r["username"],
+                "mentions_in": int(r["mentions_in"]),
+                "mentions_out": int(r["mentions_out"]),
+                "degree": int(r["degree"]),
+            }
+            for r in graph.iter_rows(named=True)
+        ]
+    }
+
+
+def _compute_quote_replies(df: pl.DataFrame, top_n: int = REPLY_TOP_N) -> dict:
+    """Directed A→B reply counts inferred from mentions + recency.
+
+    A "reply" is: message by A at time t contains @B, and B posted within
+    REPLY_WINDOW_S before t. Not ground truth (no reply API exists), but the
+    right shape for finding back-and-forth conversations. Signal is
+    correlational, not causal.
+    """
+    if df.height < 2:
+        return {"quote_reply_count": 0, "quote_reply_pairs": []}
+
+    # Flatten message-mention edges.
+    mentions = (
+        df.select(
+            pl.col("ts").alias("ts_reply"),
+            pl.col("username").str.to_lowercase().alias("from_user"),
+            pl.col("text").str.extract_all(MENTION_RE).alias("mentions_raw"),
+        )
+        .explode("mentions_raw", empty_as_null=True)
+        .drop_nulls("mentions_raw")
+        .with_columns(pl.col("mentions_raw").str.slice(1).str.to_lowercase().alias("to_user"))
+        .drop("mentions_raw")
+        .filter(pl.col("from_user") != pl.col("to_user"))
+        .sort("ts_reply")
+    )
+    if mentions.is_empty():
+        return {"quote_reply_count": 0, "quote_reply_pairs": []}
+
+    # Candidate reply targets: every message by every user.
+    targets = df.select(
+        pl.col("ts").alias("ts_target"),
+        pl.col("username").str.to_lowercase().alias("target_user"),
+    ).sort("ts_target")
+
+    # asof join: for each mention, find the most recent prior message by the
+    # mentioned user. Both frames are sorted on their join timestamp (polars
+    # can't verify that with by-groups, hence check_sortedness=False).
+    matched = mentions.join_asof(
+        targets,
+        left_on="ts_reply",
+        right_on="ts_target",
+        by_left="to_user",
+        by_right="target_user",
+        strategy="backward",
+        check_sortedness=False,
+    )
+
+    # Filter to within the reply window; drop nulls (no prior message).
+    matched = matched.filter(
+        pl.col("ts_target").is_not_null()
+        & ((pl.col("ts_reply") - pl.col("ts_target")).dt.total_seconds() <= REPLY_WINDOW_S)
+    )
+    reply_count = matched.height
+
+    top = (
+        matched.group_by("from_user", "to_user")
+        .len()
+        .sort(["len", "from_user", "to_user"], descending=[True, False, False])
+        .head(top_n)
+    )
+
+    return {
+        "quote_reply_count": reply_count,
+        "quote_reply_pairs": [
+            {"from_user": r["from_user"], "to_user": r["to_user"], "count": int(r["len"])}
+            for r in top.iter_rows(named=True)
+        ],
+    }
+
+
+def _compute_mutual_mentions(pairs: pl.DataFrame, top_n: int) -> dict:
+    """Unordered user pairs that mention each other (both directions)."""
+    if pairs.is_empty():
+        return {"mutual_mention_pairs": []}
+
+    edges = pairs.group_by("from_user", "to_user").len().rename({"len": "count"})
+
+    ab = edges.rename({"from_user": "user_a", "to_user": "user_b"})
+    ba = edges.rename({"from_user": "user_b", "to_user": "user_a", "count": "count_ba"})
+
+    mutual = (
+        ab.join(ba, on=["user_a", "user_b"], how="inner")
+        .with_columns((pl.col("count") + pl.col("count_ba")).alias("total"))
+        .filter(pl.col("user_a") < pl.col("user_b"))  # keep one direction only
+        .sort(["total", "user_a", "user_b"], descending=[True, False, False])
+        .head(top_n)
+    )
+
+    return {
+        "mutual_mention_pairs": [
+            {
+                "user_a": r["user_a"],
+                "user_b": r["user_b"],
+                "count_ab": int(r["count"]),
+                "count_ba": int(r["count_ba"]),
+                "total": int(r["total"]),
+            }
+            for r in mutual.iter_rows(named=True)
+        ]
     }
 
 
@@ -1081,12 +1507,19 @@ def _compute_sessions(df: pl.DataFrame, gap_min: int) -> dict:
         .with_columns(((pl.col("end") - pl.col("start")).dt.total_seconds() / 60.0).alias("dur_min"))
     )
 
+    # Session-length distribution over the existing durations.
+    dur = agg["dur_min"]
+    median_dur = dur.median()
+    p90_dur = dur.quantile(0.90)
+
     return {
         "sessions": {
             "total_sessions": agg.height,
             "avg_messages_per_session": float(agg["n"].mean()) if agg.height else None,
-            "avg_session_minutes": float(agg["dur_min"].mean()) if agg.height else None,
-            "longest_session_minutes": float(agg["dur_min"].max()) if agg.height else None,
+            "avg_session_minutes": float(dur.mean()) if agg.height else None,
+            "longest_session_minutes": float(dur.max()) if agg.height else None,
+            "median_session_minutes": round(float(median_dur), 2) if median_dur is not None else None,
+            "p90_session_minutes": round(float(p90_dur), 2) if p90_dur is not None else None,
         }
     }
 
@@ -1098,6 +1531,10 @@ def _compute_concentration(df: pl.DataFrame) -> dict:
 
     total = sum(counts_list)
     n = len(counts_list)
+    # Gini via the ordered-statistics form:
+    #   G = |sum((2i - n - 1) * x_i)| / (n * sum(x))
+    # over ascending x. Cheap on the small `counts_list` and avoids the
+    # cumulative-sum loop the textbook formula would need.
     xasc = sorted(counts_list, reverse=False)
     num = sum((2 * i - n - 1) * v for i, v in enumerate(xasc, 1))
     gini = abs(num) / (n * total) if n * total else 0.0
@@ -1113,22 +1550,52 @@ def _compute_concentration(df: pl.DataFrame) -> dict:
     }
 
 
-def _compute_message_classes(df: pl.DataFrame, twitch_emotes: pl.Series, emote_map: dict[str, str]) -> dict:
+LORENZ_FRACTIONS = (0.01, 0.05, 0.10, 0.25, 0.50)
+
+
+def _compute_lorenz(df: pl.DataFrame) -> dict:
+    """Fixed points on the Lorenz curve: where concentration actually lives."""
+    counts_list = df.group_by("user_id").len().sort("len", descending=True)["len"].to_list()
+    if not counts_list:
+        return {"lorenz_samples": []}
+
+    total = sum(counts_list)
+    n = len(counts_list)
+    if total == 0:
+        return {"lorenz_samples": []}
+
+    cumulative = 0
+    idx = 0
+    samples: list[dict] = []
+    for frac in LORENZ_FRACTIONS:
+        cutoff = max(1, math.ceil(n * frac))
+        while idx < cutoff:
+            cumulative += counts_list[idx]
+            idx += 1
+        samples.append(
+            {
+                "top_pct": round(frac * 100, 2),
+                "message_share_pct": round(cumulative / total * 100, 2),
+            }
+        )
+    return {"lorenz_samples": samples}
+
+
+def _compute_message_classes(
+    df: pl.DataFrame, twitch_emotes: pl.Series, emote_map: dict[str, str]
+) -> dict:
+    """Message-shape buckets. NOTE: meaningful `emote_only` numbers need a
+    non-empty `emote_map` (third-party catalog) and/or Twitch `emotes` tags —
+    with both empty every message trivially has no known emotes."""
     txt = pl.col("text")
     r = txt.str.strip_chars_end()
-
-    questions = int(df.filter(r.str.ends_with("?")).height)
-    exclamations = int(df.filter(r.str.ends_with("!")).height)
-    short_msgs = int(df.filter(txt.str.len_chars() <= 3).height)
-    long_msgs = int(df.filter(txt.str.len_chars() >= 200).height)
 
     # Unicode-aware so Polish/Cyrillic/etc. aren't miscounted as non-letters.
     alpha_count = txt.str.extract_all(r"\p{L}").list.len()
     upper_count = txt.str.extract_all(r"\p{Lu}").list.len()
-    all_caps = int(df.filter((alpha_count >= MIN_ALPHA_FOR_CAPS) & (upper_count >= (alpha_count * 0.8))).height)
 
-    # Gather all known emote names (third-party catalog values + Twitch names)
-    # so a message that is *only* emotes can be identified.
+    # Gather all known emote names once (third-party catalog values + Twitch
+    # names) so a message that is *only* emotes can be identified.
     known_emotes_lower: set[str] = {v.lower() for v in emote_map.values()}
     if not twitch_emotes.is_empty():
         twitch_names = twitch_emotes.explode(empty_as_null=True).drop_nulls().unique().to_list()
@@ -1154,16 +1621,28 @@ def _compute_message_classes(df: pl.DataFrame, twitch_emotes: pl.Series, emote_m
     has_twitch_emote = twitch_emotes.list.len() > 0
     has_3rd_party_emote = words.list.len() > non_emote_words
     has_any_emote = has_twitch_emote | has_3rd_party_emote
-    emote_only = int(df.filter(has_any_emote & (non_emote_words == 0)).height)
+
+    # One pass: build boolean masks per class, then sum. Each `.sum()` on a
+    # Boolean column is an integer count of the True rows.
+    counts = df.select(
+        r.str.ends_with("?").sum().alias("questions"),
+        r.str.ends_with("!").sum().alias("exclamations"),
+        (txt.str.len_chars() <= 3).sum().alias("short_messages"),
+        (txt.str.len_chars() >= 200).sum().alias("long_messages"),
+        ((alpha_count >= MIN_ALPHA_FOR_CAPS) & (upper_count >= (alpha_count * 0.8)))
+            .sum()
+            .alias("all_caps"),
+        (has_any_emote & (non_emote_words == 0)).sum().alias("emote_only"),
+    )
 
     return {
         "message_classes": {
-            "questions": questions,
-            "exclamations": exclamations,
-            "all_caps": all_caps,
-            "emote_only": emote_only,
-            "short_messages": short_msgs,
-            "long_messages": long_msgs,
+            "questions": int(counts["questions"][0]),
+            "exclamations": int(counts["exclamations"][0]),
+            "all_caps": int(counts["all_caps"][0]),
+            "emote_only": int(counts["emote_only"][0]),
+            "short_messages": int(counts["short_messages"][0]),
+            "long_messages": int(counts["long_messages"][0]),
         }
     }
 
@@ -1231,6 +1710,220 @@ def _compute_new_returning(df: pl.DataFrame) -> dict:
     return {"daily_new_chatters": daily_new, "daily_returning_chatters": daily_returning}
 
 
+def _compute_self_repetition(df: pl.DataFrame) -> dict:
+    """Same user sending the identical text twice in a row (per-user sequence)."""
+    if df.height < 2:
+        return {"self_repetition_count": 0, "self_repetition_pct": None}
+
+    s = df.select("user_id", "text", "ts").sort("user_id", "ts")
+    s = s.with_columns(
+        (
+            (pl.col("user_id") == pl.col("user_id").shift(1))
+            & (pl.col("text") == pl.col("text").shift(1))
+        )
+        .fill_null(False)
+        .alias("is_repeat")
+    )
+    count = int(s["is_repeat"].sum())
+    total = df.height
+    return {
+        "self_repetition_count": count,
+        "self_repetition_pct": round(count / total * 100, 2) if total else None,
+    }
+
+
+def _compute_copy_paste_chains(df: pl.DataFrame) -> dict:
+    """Same text reposted by *different* users within a short window (raids/copypasta).
+
+    ``cross_user_copy_paste_count`` counts chain *events* (inter-user
+    handoffs: five users reposting in sequence is four events), while
+    ``cross_user_copy_paste_texts`` counts distinct texts with >= 1 event.
+    """
+    if df.height < COPY_PASTE_MIN_OCCURRENCES:
+        return {
+            "cross_user_copy_paste_count": 0,
+            "cross_user_copy_paste_texts": 0,
+            "top_copy_paste_chains": [],
+        }
+
+    # Only texts that appear >= N times across >= 2 users are candidates.
+    # This keeps the join bounded even for channels with heavy spam.
+    candidate_texts = (
+        df.group_by("text")
+        .agg(pl.len().alias("n"), pl.col("user_id").n_unique().alias("u"))
+        .filter((pl.col("n") >= COPY_PASTE_MIN_OCCURRENCES) & (pl.col("u") >= 2))
+    )
+    if candidate_texts.is_empty():
+        return {
+            "cross_user_copy_paste_count": 0,
+            "cross_user_copy_paste_texts": 0,
+            "top_copy_paste_chains": [],
+        }
+
+    candidates = (
+        df.join(candidate_texts.select("text"), on="text", how="inner")
+        .select("text", "user_id", "ts")
+        .sort(["text", "ts"])
+        .with_columns(
+            [
+                pl.col("user_id").shift(1).over("text").alias("prev_user"),
+                pl.col("ts").shift(1).over("text").alias("prev_ts"),
+            ]
+        )
+    )
+
+    # A chain event: consecutive same-text messages by *different* users
+    # within the window.
+    chains = candidates.filter(
+        pl.col("prev_user").is_not_null()
+        & (pl.col("user_id") != pl.col("prev_user"))
+        & ((pl.col("ts") - pl.col("prev_ts")).dt.total_seconds() <= COPY_PASTE_WINDOW_S)
+    )
+
+    # Distinct participants include the originator (present only as prev_user
+    # on the first event), so union both sides rather than counting reposters.
+    distinct_users = (
+        chains.select("text", "user_id")
+        .vstack(chains.select("text", pl.col("prev_user").alias("user_id")).drop_nulls("user_id"))
+        .group_by("text")
+        .agg(pl.col("user_id").n_unique().alias("distinct_users"))
+    )
+    top = (
+        chains.group_by("text")
+        .agg(pl.len().alias("occurrences"))
+        .join(distinct_users, on="text", how="left")
+        .sort(["occurrences", "text"], descending=[True, False])
+        .head(COPY_PASTE_TOP_N)
+    )
+
+    return {
+        "cross_user_copy_paste_count": chains.height,
+        "cross_user_copy_paste_texts": chains.select("text").n_unique(),
+        "top_copy_paste_chains": [
+            {"text": t[:200], "occurrences": int(o), "distinct_users": int(u)}
+            for t, o, u in zip(top["text"], top["occurrences"], top["distinct_users"], strict=True)
+        ],
+    }
+
+
+def _compute_emote_diversity(df: pl.DataFrame, twitch_emotes: pl.Series, top_n: int) -> dict:
+    """Per-user emote vocabulary breadth (Twitch-native emotes, like pairs)."""
+    if df.is_empty() or len(twitch_emotes) != df.height:
+        return {"emote_diversity": []}
+
+    edf = pl.DataFrame(
+        {"user_id": df["user_id"], "username": df["username"], "emotes": twitch_emotes}
+    ).filter(pl.col("emotes").list.len() > 0)
+    if edf.is_empty():
+        return {"emote_diversity": []}
+
+    grouped = (
+        edf.explode("emotes", empty_as_null=True)
+        .group_by("user_id")
+        .agg(
+            pl.col("username").last().alias("username"),
+            pl.len().alias("total_emote_uses"),
+            pl.col("emotes").n_unique().alias("unique_emotes"),
+        )
+        .filter(pl.col("total_emote_uses") >= 5)  # minimum signal threshold
+        .with_columns(
+            (pl.col("unique_emotes") / pl.col("total_emote_uses")).round(4).alias("diversity_ratio")
+        )
+        .sort(["total_emote_uses", "user_id"], descending=[True, False])
+        .head(top_n)
+    )
+
+    return {
+        "emote_diversity": [
+            {
+                "user_id": r["user_id"],
+                "username": r["username"],
+                "total_emote_uses": int(r["total_emote_uses"]),
+                "unique_emotes": int(r["unique_emotes"]),
+                "diversity_ratio": float(r["diversity_ratio"]),
+            }
+            for r in grouped.iter_rows(named=True)
+        ]
+    }
+
+
+def _compute_non_ascii(df: pl.DataFrame) -> dict:
+    """Share of non-ASCII characters (raid/audience-shift signal)."""
+    if df.height == 0:
+        return {"non_ascii_ratio": None, "messages_with_non_ascii": 0}
+
+    per_msg = df.select(
+        pl.col("text").str.extract_all(r"\P{ASCII}").list.len().alias("non_ascii"),
+        pl.col("text").str.len_chars().alias("len_chars"),
+    )
+
+    total_chars = int(per_msg["len_chars"].sum())
+    non_ascii_chars = int(per_msg["non_ascii"].sum())
+    messages_with = int(per_msg.filter(pl.col("non_ascii") > 0).height)
+
+    return {
+        "non_ascii_ratio": round(non_ascii_chars / total_chars, 4) if total_chars else None,
+        "messages_with_non_ascii": messages_with,
+    }
+
+
+def _compute_first_message_hours(df: pl.DataFrame) -> dict:
+    """Hour-of-day histogram of each user's first message *in the range*."""
+    if df.height == 0:
+        return {"first_message_hours": [0] * 24}
+
+    first_per_user = df.group_by("user_id").agg(pl.col("ts").min().alias("first_ts"))
+    histogram = [0] * 24
+    for h, count in (
+        first_per_user.select(pl.col("first_ts").dt.hour().alias("h")).group_by("h").len().iter_rows()
+    ):
+        histogram[int(h)] = int(count)
+    return {"first_message_hours": histogram}
+
+
+def _poisson_upper_tail(k: int, lam: float) -> float:
+    """P(X >= k) for X ~ Poisson(lam)."""
+    if k <= 0:
+        return 1.0
+    if lam < POISSON_NORMAL_APPROX_LAMBDA:
+        # Direct: sum terms upward. Use log-gamma to avoid factorial overflow.
+        log_lam = math.log(lam) if lam > 0 else float("-inf")
+        if log_lam == float("-inf"):
+            return 0.0
+        log_p = -lam + k * log_lam - math.lgamma(k + 1)
+        total = math.exp(log_p)
+        j = k
+        while True:
+            j += 1
+            log_p += log_lam - math.log(j)
+            term = math.exp(log_p)
+            if term < 1e-15:
+                break
+            total += term
+        return min(1.0, total)
+    # Normal approximation with continuity correction.
+    z = (k - 0.5 - lam) / math.sqrt(lam)
+    return 0.5 * math.erfc(z / math.sqrt(2))
+
+
+def _poisson_lower_tail(k: int, lam: float) -> float:
+    """P(X <= k) for X ~ Poisson(lam)."""
+    if k < 0:
+        return 0.0
+    if lam < POISSON_NORMAL_APPROX_LAMBDA:
+        log_lam = math.log(lam) if lam > 0 else float("-inf")
+        if log_lam == float("-inf"):
+            return 1.0 if k >= 0 else 0.0
+        log_p = -lam
+        total = math.exp(log_p)
+        for j in range(1, k + 1):
+            log_p += log_lam - math.log(j)
+            total += math.exp(log_p)
+        return min(1.0, total)
+    z = (k + 0.5 - lam) / math.sqrt(lam)
+    return 0.5 * math.erfc(-z / math.sqrt(2))
+
+
 def _detect_anomalies(df: pl.DataFrame, sigma: float) -> list[dict]:
     if df.height < 10:
         return []
@@ -1256,14 +1949,23 @@ def _detect_anomalies(df: pl.DataFrame, sigma: float) -> list[dict]:
         .head(MAX_ANOMALIES)
     )
 
-    return [
-        {
-            "window_start": r["ts"].isoformat(),
-            "message_count": int(r["len"]),
-            "z_score": round(float(r["z_score"]), 2),
-        }
-        for r in anomalies.iter_rows(named=True)
-    ]
+    lam = float(mean)
+    out: list[dict] = []
+    for r in anomalies.iter_rows(named=True):
+        k = int(r["len"])
+        z = float(r["z_score"])
+        # Upper tail for spikes, lower tail for dips. Both are "how extreme
+        # under a Poisson(mean) null for this channel".
+        p = _poisson_upper_tail(k, lam) if z > 0 else _poisson_lower_tail(k, lam)
+        out.append(
+            {
+                "window_start": r["ts"].isoformat(),
+                "message_count": k,
+                "z_score": round(z, 2),
+                "p_value": round(p, 6),
+            }
+        )
+    return out
 
 
 def _detect_language(df: pl.DataFrame) -> list[dict]:
@@ -1313,6 +2015,210 @@ def _detect_language(df: pl.DataFrame) -> list[dict]:
     ]
 
 
+BOT_MIN_MESSAGES = 50
+BOT_TOP_N = 50
+
+
+def _compute_bot_scores(df: pl.DataFrame, top_n: int = BOT_TOP_N) -> dict:
+    """Heuristic bot-likelihood for the most active chatters.
+
+    Signals (each contributes to a bounded score):
+      - regular_interval: low stdev of inter-message gaps (< 5s stddev)
+      - low_diversity:    unique-text ratio < 0.3
+      - command_spam:     >50% of messages start with '!'
+
+    Not a classifier — a triage list. Score is a weighted sum in [0, 1].
+    """
+    if df.height == 0:
+        return {"bot_likelihood": []}
+
+    per_user = (
+        df.sort("user_id", "ts")
+        .with_columns(pl.col("ts").diff().dt.total_seconds().over("user_id").alias("gap_s"))
+        .group_by("user_id")
+        .agg(
+            pl.col("username").last().alias("username"),
+            pl.len().alias("n"),
+            pl.col("gap_s").std().alias("gap_std"),
+            pl.col("text").n_unique().alias("unique_texts"),
+            pl.col("text").str.starts_with("!").mean().alias("command_ratio"),
+        )
+        .filter(pl.col("n") >= BOT_MIN_MESSAGES)
+        .with_columns((pl.col("unique_texts") / pl.col("n")).alias("diversity_ratio"))
+    )
+
+    if per_user.is_empty():
+        return {"bot_likelihood": []}
+
+    def signals_for(row: dict) -> list[str]:
+        s: list[str] = []
+        if row["gap_std"] is not None and row["gap_std"] < 5.0:
+            s.append("regular_interval")
+        if row["diversity_ratio"] < 0.3:
+            s.append("low_diversity")
+        if row["command_ratio"] > 0.5:
+            s.append("command_spam")
+        return s
+
+    weights = {"regular_interval": 0.4, "low_diversity": 0.4, "command_spam": 0.2}
+
+    scored: list[dict] = []
+    for r in per_user.iter_rows(named=True):
+        sigs = signals_for(r)
+        score = min(1.0, sum(weights[s] for s in sigs))
+        if score > 0:
+            scored.append(
+                {
+                    "user_id": r["user_id"],
+                    "username": r["username"],
+                    "score": round(score, 3),
+                    "signals": sigs,
+                }
+            )
+    scored.sort(key=lambda x: (-x["score"], x["user_id"]))
+    return {"bot_likelihood": scored[:top_n]}
+
+
+COHORT_MAX_WEEKS = 8
+
+
+def _compute_cohort_retention(df: pl.DataFrame) -> dict:
+    """Monday-anchored signup cohorts × trailing retention (bounded 8×9)."""
+    if df.height == 0:
+        return {"cohort_retention": []}
+
+    # Monday-aligned active weeks per user.
+    active = df.select("user_id", pl.col("ts").dt.truncate("1w").alias("week")).unique()
+    first_week = active.group_by("user_id").agg(pl.col("week").min().alias("cohort_week"))
+    joined = active.join(first_week, on="user_id", how="left").with_columns(
+        ((pl.col("week") - pl.col("cohort_week")).dt.total_days() / 7).cast(pl.Int32).alias("week_offset")
+    )
+
+    # Group sizes: number of users who first appeared in each cohort week.
+    sizes = first_week.group_by("cohort_week").agg(pl.len().alias("cohort_size"))
+
+    # Active count per (cohort, offset).
+    cells = joined.group_by("cohort_week", "week_offset").agg(
+        pl.col("user_id").n_unique().alias("active")
+    )
+    cells = cells.join(sizes, on="cohort_week", how="left").with_columns(
+        (pl.col("active") / pl.col("cohort_size") * 100).round(2).alias("retention_pct")
+    )
+
+    # Cap: most recent COHORT_MAX_WEEKS cohorts, offsets 0..COHORT_MAX_WEEKS.
+    # Two plain list columns (not pl.struct in agg): struct-in-agg yields
+    # List(Struct) on some Polars versions and raises on others.
+    cohorts = (
+        cells.filter(pl.col("week_offset") <= COHORT_MAX_WEEKS)
+        .filter(pl.col("week_offset") >= 0)
+        .sort(["cohort_week", "week_offset"])
+        .group_by("cohort_week", maintain_order=True)
+        .agg(
+            pl.col("cohort_size").first(),
+            pl.col("week_offset").alias("offsets"),
+            pl.col("retention_pct").alias("retentions"),
+        )
+        .sort("cohort_week", descending=True)
+        .head(COHORT_MAX_WEEKS)
+        .sort("cohort_week")
+    )
+
+    rows = []
+    for r in cohorts.iter_rows(named=True):
+        offsets = r["offsets"]
+        retentions = r["retentions"]
+        rows.append(
+            {
+                "cohort_week": r["cohort_week"].date().isoformat(),
+                "cohort_size": int(r["cohort_size"]),
+                "retention": [
+                    {"week_offset": int(o), "retention_pct": float(p)}
+                    for o, p in zip(offsets, retentions, strict=True)
+                ],
+            }
+        )
+    return {"cohort_retention": rows}
+
+
+def _compute_length_trend(df: pl.DataFrame) -> dict:
+    """Per-day average message length + OLS slope (chars/day, closed form)."""
+    if df.height < 2:
+        return {"message_length_trend_slope": None}
+
+    per_day = (
+        df.group_by(pl.col("ts").dt.date().alias("day"))
+        .agg(pl.col("text").str.len_chars().mean().alias("avg_len"))
+        .sort("day")
+    )
+    if per_day.height < 2:
+        return {"message_length_trend_slope": None}
+
+    xs = list(range(per_day.height))
+    ys = per_day["avg_len"].to_list()
+    n = len(xs)
+    sx = sum(xs)
+    sy = sum(ys)
+    sxy = sum(x * y for x, y in zip(xs, ys, strict=True))
+    sxx = sum(x * x for x in xs)
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        return {"message_length_trend_slope": None}
+    slope = (n * sxy - sx * sy) / denom
+    return {"message_length_trend_slope": round(slope, 4)}
+
+
+def _detect_language_by_day(df: pl.DataFrame) -> list[dict]:
+    """Top language per day (same sampling as _detect_language, per day)."""
+    try:
+        from langdetect import DetectorFactory, detect  # type: ignore
+        from langdetect.lang_detect_exception import LangDetectException  # type: ignore
+    except ImportError:
+        return []
+
+    DetectorFactory.seed = 0
+    cleaned = _clean_text_expr(lowercase=False)
+
+    # Sample up to LANG_SAMPLE_SIZE messages per day, alphabetic-only.
+    candidates = df.select(
+        pl.col("ts").dt.date().alias("day"),
+        cleaned.alias("c"),
+    ).filter(pl.col("c").str.extract_all(r"\p{L}").list.len() >= MIN_ALPHA_CHARS_FOR_LANG)
+    if candidates.is_empty():
+        return []
+
+    per_day: dict[str, list[str]] = {}
+    for day, text in zip(candidates["day"].to_list(), candidates["c"].to_list(), strict=True):
+        per_day.setdefault(day.isoformat(), []).append(text)
+
+    out: list[dict] = []
+    for day, texts in sorted(per_day.items()):
+        # Seed derived from the day itself (string seeds are deterministic
+        # across runs, unlike hash()): each day draws from its own stream,
+        # so adding/removing day 0 never reshuffles every later dot — while
+        # two days with equal-sized pools no longer mirror each other.
+        day_rng = random.Random(f"langday:{day}")
+        sample = day_rng.sample(texts, min(LANG_SAMPLE_SIZE, len(texts)))
+        lang_counts: dict[str, int] = {}
+        for t in sample:
+            try:
+                lang = detect(t)
+            except LangDetectException:
+                continue
+            lang_counts[lang] = lang_counts.get(lang, 0) + 1
+        total = sum(lang_counts.values())
+        if total == 0:
+            continue
+        top_lang, top_count = max(lang_counts.items(), key=lambda kv: kv[1])
+        out.append(
+            {
+                "date": day,
+                "language": top_lang,
+                "percentage": round(top_count / total * 100, 2),
+            }
+        )
+    return out
+
+
 # --- Orchestrator ---
 
 
@@ -1343,28 +2249,58 @@ def compute_stats(df: pl.DataFrame, params: Params, emote_map: dict[str, str]) -
     stats.update(_compute_activity_per_day(df))
     stats.update(_compute_time(df))
     stats.update(_compute_roles(df))
+    stats.update(_compute_first_message_hours(df))
 
     top_emotes, seen_emotes = _count_emotes(df, twitch_emotes, emote_map, params.top_emotes_n)
     stats["top_emotes"] = top_emotes
 
-    if params.include_emote_pairs:
-        stats["top_emote_pairs"] = _compute_emote_pairs(twitch_emotes, params.top_n)
+    # Build the emote-pairs frame once, feed both consumers.
+    if params.include_emote_pairs or params.include_emote_centrality:
+        emote_pairs = _emote_pairs_frame(twitch_emotes)
+    else:
+        emote_pairs = None
+
+    if params.include_emote_pairs and emote_pairs is not None:
+        stats["top_emote_pairs"] = _compute_emote_pairs(emote_pairs, params.top_n)
+    if params.include_emote_centrality and emote_pairs is not None:
+        stats.update(_compute_emote_centrality(emote_pairs, params.top_n))
+    if params.include_emote_entropy:
+        stats.update(_compute_emote_entropy(twitch_emotes))
+
+    stats.update(_compute_emote_diversity(df, twitch_emotes, params.top_n))
 
     stopwords = STOPWORDS | {name.lower() for name in seen_emotes}
     stats.update(_compute_words(df, stopwords, params.top_words_n))
+
+    stats.update(_compute_non_ascii(df))
+    stats.update(_compute_self_repetition(df))
 
     if params.include_commands:
         stats.update(_compute_commands(df, params.top_n))
     if params.include_links:
         stats.update(_compute_links(df, params.top_n))
-    if params.include_mentions:
-        stats.update(_compute_mentions(df, params.top_n))
+
+    # Mention frame once, feed three consumers.
+    if params.include_mentions or params.include_mention_graph or params.include_mutual_mentions:
+        mention_pairs = _mention_pairs_frame(df)
+    else:
+        mention_pairs = None
+
+    if params.include_mentions and mention_pairs is not None:
+        stats.update(_compute_mentions(df, params.top_n, mention_pairs))
+    if params.include_mention_graph and mention_pairs is not None:
+        stats.update(_compute_mention_graph(mention_pairs, params.top_n))
+    if params.include_mutual_mentions and mention_pairs is not None:
+        stats.update(_compute_mutual_mentions(mention_pairs, params.top_n))
+
     if params.include_duplicates:
         stats.update(_compute_health(df, params.top_n))
     if params.include_sessions:
         stats.update(_compute_sessions(df, params.session_gap_minutes))
     if params.include_concentration:
         stats.update(_compute_concentration(df))
+    if params.include_lorenz:
+        stats.update(_compute_lorenz(df))
     if params.include_message_class:
         stats.update(_compute_message_classes(df, twitch_emotes, emote_map))
     if params.include_phrases:
@@ -1375,8 +2311,67 @@ def compute_stats(df: pl.DataFrame, params: Params, emote_map: dict[str, str]) -
         stats["anomalies_5m"] = _detect_anomalies(df, params.anomaly_sigma)
     if params.include_language:
         stats["language_breakdown"] = _detect_language(df)
+    if params.include_language and params.include_language_by_day:
+        stats["language_by_day"] = _detect_language_by_day(df)
+    if params.include_copy_paste_chains:
+        stats.update(_compute_copy_paste_chains(df))
+    if params.include_length_trend:
+        stats.update(_compute_length_trend(df))
+    if params.include_cohort_retention:
+        stats.update(_compute_cohort_retention(df))
+    if params.include_bot_scores:
+        stats.update(_compute_bot_scores(df))
+    if params.include_quote_replies:
+        stats.update(_compute_quote_replies(df))
 
+    stats["warnings"] = _sanity_warnings(df, stats)
     return stats
+
+
+def _sanity_warnings(df: pl.DataFrame, stats: dict) -> list[str]:
+    """Data-quality flags: cheap cross-checks over the finished stats."""
+    w: list[str] = []
+    if df.height == 0:
+        return w
+
+    avg_len = stats.get("avg_message_length")
+    if avg_len is not None:
+        if avg_len < MIN_PLAUSIBLE_AVG_MESSAGE_LEN:
+            w.append(
+                f"avg_message_length={avg_len:.2f} is implausibly small; "
+                "upstream may be truncating text."
+            )
+        if avg_len > MAX_PLAUSIBLE_AVG_MESSAGE_LEN:
+            w.append(
+                f"avg_message_length={avg_len:.2f} is implausibly large; "
+                "check for merged messages upstream."
+            )
+
+    # messages_per_day should span the same day count as days_spanned.
+    mpd = stats.get("messages_per_day") or []
+    spanned = stats.get("days_spanned")
+    if spanned is not None and mpd and len(mpd) != spanned:
+        w.append(
+            f"messages_per_day has {len(mpd)} entries but days_spanned={spanned}; "
+            "gaps in the range may be missing from the cache."
+        )
+
+    # Every hourly bucket should sum to total_messages.
+    hourly = stats.get("activity_by_hour")
+    total = stats.get("total_messages")
+    if hourly is not None and total is not None and sum(hourly) != total:
+        w.append(f"activity_by_hour sums to {sum(hourly)} but total_messages={total}.")
+
+    empty = int((df["text"].str.len_chars() == 0).sum())
+    if empty > 0:
+        w.append(f"{empty} messages have empty text — likely upstream dropouts.")
+
+    if df.height >= 2:
+        ts = df["ts"]
+        if (ts.diff().dt.total_seconds() < 0).any():
+            w.append("timestamps are not monotonic; cache merge may have reordered rows.")
+
+    return w
 
 
 # --- Execution & Caching ---

@@ -28,7 +28,6 @@ pub fn run() {
             read,
             write,
             sidecar::get_backend,
-            sidecar::probe_backend,
             sidecar::shutdown_backend
         ])
         .build(tauri::generate_context!())

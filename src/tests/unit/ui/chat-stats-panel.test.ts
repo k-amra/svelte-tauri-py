@@ -75,7 +75,9 @@ const fakeStats: ChatStatsResult = {
 		total_sessions: 2,
 		avg_messages_per_session: 21,
 		avg_session_minutes: 30,
-		longest_session_minutes: 45
+		longest_session_minutes: 45,
+		median_session_minutes: 25,
+		p90_session_minutes: 40
 	},
 	concentration: { gini_coefficient: 0.4, top_10pct_share: 55.5 },
 	message_classes: {
@@ -88,12 +90,57 @@ const fakeStats: ChatStatsResult = {
 	},
 	top_phrases: [],
 	top_peaks_5m: [{ window_start: '2024-01-15T10:00:00+00:00', message_count: 20 }],
-	chatter_message_quantiles: { p50: 5, p75: 10, p90: 20, p95: 28 },
+	chatter_message_quantiles: { p50: 5, p75: 10, p90: 20, p95: 28, p99: 30 },
 	activity_per_day_stats: { avg_active_chatters: 4.5, peak_active_chatters: 7 },
 	daily_new_chatters: [{ date: '2024-01-15', count: 7 }],
 	daily_returning_chatters: [{ date: '2024-01-16', count: 2 }],
 	language_breakdown: [],
-	anomalies_5m: []
+	anomalies_5m: [],
+	peak_concurrent_chatters: 6,
+	peak_concurrent_window: '2024-01-15T10:00:00+00:00',
+	vocab_richness: 0.42,
+	unique_word_count: 100,
+	self_repetition_count: 3,
+	self_repetition_pct: 7.14,
+	cross_user_copy_paste_count: 2,
+	cross_user_copy_paste_texts: 1,
+	top_copy_paste_chains: [{ text: 'raid incoming', occurrences: 2, distinct_users: 3 }],
+	non_ascii_ratio: 0.05,
+	messages_with_non_ascii: 2,
+	emote_diversity: [
+		{
+			user_id: 'u3',
+			username: 'carol',
+			total_emote_uses: 10,
+			unique_emotes: 4,
+			diversity_ratio: 0.4
+		}
+	],
+	mention_graph: [{ username: 'zed', mentions_in: 2, mentions_out: 1, degree: 3 }],
+	mutual_mention_pairs: [{ user_a: 'amy', user_b: 'zed', count_ab: 2, count_ba: 1, total: 3 }],
+	emote_centrality: [{ emote: 'PogChamp', distinct_co_occurrences: 4 }],
+	lorenz_samples: [{ top_pct: 10, message_share_pct: 55.5 }],
+	emote_entropy: 1.5,
+	bot_likelihood: [
+		{ user_id: 'u9', username: 'botty', score: 0.8, signals: ['regular_interval', 'low_diversity'] }
+	],
+	message_length_trend_slope: -0.42,
+	cohort_retention: [
+		{
+			cohort_week: '2024-01-15',
+			cohort_size: 7,
+			retention: [{ week_offset: 0, retention_pct: 100 }]
+		}
+	],
+	language_by_day: [{ date: '2024-01-15', language: 'en', percentage: 90 }],
+	first_message_hours: Array.from({ length: 24 }, (_, h) => (h === 10 ? 5 : 0)),
+	hapax_ratio: 0.5,
+	zipf_slope: -0.9,
+	trend_by_day: [{ date: '2024-01-15', count: 42 }],
+	weekly_seasonality: [1, 1, 1, 1, 1, 1.15, 0.85],
+	quote_reply_count: 1,
+	quote_reply_pairs: [{ from_user: 'alice', to_user: 'bob', count: 1 }],
+	warnings: ['test warning']
 };
 
 async function fillDates() {
@@ -173,7 +220,18 @@ describe('ChatStatsPanel', () => {
 					top_words_n: 50,
 					top_emotes_n: 50,
 					include_commands: true,
-					include_language: false
+					include_language: false,
+					include_copy_paste_chains: true,
+					include_mention_graph: false,
+					include_mutual_mentions: false,
+					include_emote_centrality: false,
+					include_emote_entropy: false,
+					include_lorenz: false,
+					include_bot_scores: false,
+					include_length_trend: false,
+					include_cohort_retention: false,
+					include_language_by_day: false,
+					include_quote_replies: false
 				})
 			);
 		});
@@ -186,6 +244,29 @@ describe('ChatStatsPanel', () => {
 		expect(screen.getByText('Kappa')).toBeInTheDocument();
 		expect(screen.getByText('Top emote pairs')).toBeInTheDocument();
 		expect(screen.getByText(/Top commands/)).toBeInTheDocument();
+		expect(screen.getByText(/Copy-paste chains \(2 reposts/)).toBeInTheDocument();
+		expect(screen.getByText('raid incoming')).toBeInTheDocument();
+		expect(
+			screen.getByText('First message by hour (UTC, in-range first seen)')
+		).toBeInTheDocument();
+		expect(screen.getByText('Emote diversity (Twitch emotes, 5+ uses)')).toBeInTheDocument();
+		expect(screen.getByText('test warning')).toBeInTheDocument();
+		expect(screen.getByText('Weekly seasonality (vs trend)')).toBeInTheDocument();
+		expect(screen.getByText(/hapax 0\.5/)).toBeInTheDocument();
+		expect(screen.getByText('max length')).toBeInTheDocument();
+		expect(screen.getByText('Mention graph (in/out degree)')).toBeInTheDocument();
+		expect(screen.getByText('zed')).toBeInTheDocument();
+		// Checkbox label + result header share the text.
+		expect(screen.getAllByText('Mutual mentions')).toHaveLength(2);
+		expect(screen.getByText('Emote centrality (distinct co-occurrences)')).toBeInTheDocument();
+		expect(screen.getByText('PogChamp')).toBeInTheDocument();
+		expect(screen.getByText('Lorenz curve (message share by top %)')).toBeInTheDocument();
+		expect(screen.getByText('Bot likelihood (heuristic)')).toBeInTheDocument();
+		expect(screen.getByText('botty')).toBeInTheDocument();
+		expect(screen.getByText('Message length trend')).toBeInTheDocument();
+		expect(screen.getByText('Weekly cohort retention (%)')).toBeInTheDocument();
+		expect(screen.getByText('Top language per day')).toBeInTheDocument();
+		expect(screen.getByText('Quote replies (1 inferred)')).toBeInTheDocument();
 	});
 
 	it('labels the download phase in plain language', async () => {

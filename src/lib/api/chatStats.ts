@@ -20,6 +20,11 @@ export interface DayCount {
 	count: number;
 }
 
+export interface TrendPoint {
+	date: string;
+	count: number;
+}
+
 export interface WordCount {
 	word: string;
 	count: number;
@@ -28,6 +33,20 @@ export interface WordCount {
 export interface EmoteCount {
 	name: string;
 	count: number;
+}
+
+export interface EmoteDiversityStat {
+	user_id: string;
+	username: string;
+	total_emote_uses: number;
+	unique_emotes: number;
+	diversity_ratio: number;
+}
+
+export interface CopyPasteChain {
+	text: string;
+	occurrences: number;
+	distinct_users: number;
 }
 
 export interface EmotePairCount {
@@ -74,6 +93,8 @@ export interface SessionStats {
 	avg_messages_per_session: number | null;
 	avg_session_minutes: number | null;
 	longest_session_minutes: number | null;
+	median_session_minutes: number | null;
+	p90_session_minutes: number | null;
 }
 
 export interface Concentration {
@@ -114,6 +135,7 @@ export interface ChatterDist {
 	p75: number | null;
 	p90: number | null;
 	p95: number | null;
+	p99: number | null;
 }
 
 export interface ActivityPerDayStats {
@@ -130,6 +152,62 @@ export interface AnomalyStat {
 	window_start: string;
 	message_count: number;
 	z_score: number;
+	p_value: number;
+}
+
+export interface MentionDegree {
+	username: string;
+	mentions_in: number;
+	mentions_out: number;
+	degree: number;
+}
+
+export interface MutualMentionPair {
+	user_a: string;
+	user_b: string;
+	count_ab: number;
+	count_ba: number;
+	total: number;
+}
+
+export interface EmoteCentrality {
+	emote: string;
+	distinct_co_occurrences: number;
+}
+
+export interface LorenzSample {
+	top_pct: number;
+	message_share_pct: number;
+}
+
+export interface BotScore {
+	user_id: string;
+	username: string;
+	score: number;
+	signals: string[];
+}
+
+export interface CohortCell {
+	week_offset: number;
+	retention_pct: number;
+}
+
+export interface CohortRow {
+	cohort_week: string;
+	cohort_size: number;
+	retention: CohortCell[];
+}
+
+export interface DayLanguage {
+	date: string;
+	language: string;
+	percentage: number;
+}
+
+export interface QuoteReplyPair {
+	from_user: string;
+	to_user: string;
+	count: number;
 }
 
 export interface ChatStatsResult {
@@ -183,6 +261,39 @@ export interface ChatStatsResult {
 	daily_returning_chatters: DayCount[];
 	language_breakdown: LanguageBreakdown[];
 	anomalies_5m: AnomalyStat[];
+
+	peak_concurrent_chatters: number | null;
+	peak_concurrent_window: string | null;
+	/** Raw type-token ratio; length-dependent (longer ranges read lower). */
+	vocab_richness: number | null;
+	unique_word_count: number;
+	self_repetition_count: number;
+	self_repetition_pct: number | null;
+	cross_user_copy_paste_count: number;
+	cross_user_copy_paste_texts: number;
+	top_copy_paste_chains: CopyPasteChain[];
+	non_ascii_ratio: number | null;
+	messages_with_non_ascii: number;
+	emote_diversity: EmoteDiversityStat[];
+	first_message_hours: number[];
+
+	mention_graph: MentionDegree[];
+	mutual_mention_pairs: MutualMentionPair[];
+	emote_centrality: EmoteCentrality[];
+	lorenz_samples: LorenzSample[];
+	emote_entropy: number | null;
+	bot_likelihood: BotScore[];
+	message_length_trend_slope: number | null;
+	cohort_retention: CohortRow[];
+	language_by_day: DayLanguage[];
+
+	hapax_ratio: number | null;
+	zipf_slope: number | null;
+	trend_by_day: TrendPoint[];
+	weekly_seasonality: number[] | null;
+	quote_reply_count: number;
+	quote_reply_pairs: QuoteReplyPair[];
+	warnings: string[];
 }
 
 export interface ChatStatsParams {
@@ -207,6 +318,19 @@ export interface ChatStatsParams {
 	include_engagement: boolean;
 	include_anomalies: boolean;
 	include_language: boolean;
+	include_copy_paste_chains: boolean;
+	// Tier 2 toggles are optional: the backend defaults them all to false,
+	// so callers that don't pass them simply get Tier 1 behavior.
+	include_mention_graph?: boolean;
+	include_mutual_mentions?: boolean;
+	include_emote_centrality?: boolean;
+	include_emote_entropy?: boolean;
+	include_lorenz?: boolean;
+	include_bot_scores?: boolean;
+	include_length_trend?: boolean;
+	include_cohort_retention?: boolean;
+	include_language_by_day?: boolean;
+	include_quote_replies?: boolean;
 	session_gap_minutes: number;
 	anomaly_sigma: number;
 	force_refresh: boolean;

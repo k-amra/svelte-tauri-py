@@ -173,21 +173,68 @@ fn http_get(port: u16, token: Option<&str>, path: &str) -> Result<String, String
 /// from the Rust side (raw TCP, no WebView involved). If this is green but the
 /// UI's fetch() fails, the problem is between WebView and localhost
 /// (proxy, antivirus loopback filter, firewall) — not the Python server.
+#[derive(serde::Serialize)]
+pub struct BackendInfo {
+    /// False when no READY handshake has completed yet (backend still booting).
+    pub configured: bool,
+    /// TCP port of the Python sidecar; absent when unconfigured.
+    pub port: Option<u16>,
+    /// Raw bearer token; the frontend never exposes it to the DOM, only
+    /// uses it in Authorization headers via the backend store.
+    pub token: Option<String>,
+    /// Present only when `diagnostic` is true, so the hot path (frontend
+    /// startup) doesn't pay for two blocking HTTP probes.
+    pub diagnostics: Option<BackendDiagnostics>,
+}
+
+#[derive(serde::Serialize)]
+pub struct BackendDiagnostics {
+    /// Raw status line of `GET /health`, or `ERROR ...` when unreachable.
+    pub rust_health: String,
+    /// Raw status line of authenticated `GET /api/scripts`, or `ERROR ...`.
+    pub rust_scripts: String,
+}
+
+/// Single command for both "give me the port+token" and "is the backend
+/// healthy from Rust's point of view?". `diagnostic = true` adds two
+/// blocking HTTP probes (health + authenticated /api/scripts) — only call
+/// it from the Diagnostics panel, never from the startup path.
 #[tauri::command]
-pub fn probe_backend(state: tauri::State<'_, BackendState>) -> serde_json::Value {
+pub fn get_backend(
+    state: tauri::State<'_, BackendState>,
+    diagnostic: Option<bool>,
+) -> BackendInfo {
+    let diagnostic = diagnostic.unwrap_or(false);
     let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
     let Some(b) = guard.as_ref() else {
-        return serde_json::json!({ "configured": false, "hint": "READY not received yet" });
+        return BackendInfo {
+            configured: false,
+            port: None,
+            token: None,
+            diagnostics: None,
+        };
     };
     let port = b.port;
     let token = b.token.clone();
     drop(guard);
-    serde_json::json!({
-        "configured": true,
-        "port": port,
-        "rust_health": http_get(port, None, "/health").unwrap_or_else(|e| format!("ERROR {e}")),
-        "rust_scripts": http_get(port, Some(&token), "/api/scripts").unwrap_or_else(|e| format!("ERROR {e}")),
-    })
+
+    let diagnostics = if diagnostic {
+        Some(BackendDiagnostics {
+            rust_health: http_get(port, None, "/health")
+                .unwrap_or_else(|e| format!("ERROR {e}")),
+            rust_scripts: http_get(port, Some(&token), "/api/scripts")
+                .unwrap_or_else(|e| format!("ERROR {e}")),
+        })
+    } else {
+        None
+    };
+
+    BackendInfo {
+        configured: true,
+        port: Some(port),
+        token: Some(token),
+        diagnostics,
+    }
 }
 
 fn on_ready(app: &AppHandle, port: u16, token: String) {
@@ -441,15 +488,6 @@ pub fn shutdown(app: &AppHandle) {
             let _ = child.wait(); // reap
         }
     }
-}
-
-#[tauri::command]
-pub fn get_backend(state: tauri::State<'_, BackendState>) -> Result<(u16, String), String> {
-    let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    guard
-        .as_ref()
-        .map(|b| (b.port, b.token.clone()))
-        .ok_or_else(|| "backend not ready yet".to_string())
 }
 
 #[tauri::command]

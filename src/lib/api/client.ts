@@ -192,9 +192,12 @@ export const api = {
 				if (ctrl.signal.aborted) {
 					throw new Error(`job ${jobId} timed out after ${timeoutMs}ms`, { cause: e });
 				}
-				throw new Error(`job ${jobId} stream failed: ${e instanceof Error ? e.message : String(e)}`, {
-					cause: e
-				});
+				throw new Error(
+					`job ${jobId} stream failed: ${e instanceof Error ? e.message : String(e)}`,
+					{
+						cause: e
+					}
+				);
 			}
 			// Stream ended without a terminal event; fall through to a
 			// final poll so a lost terminal frame isn't fatal.

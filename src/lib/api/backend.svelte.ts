@@ -18,14 +18,20 @@ let lifecycle = 0;
 
 async function fetchBackend(): Promise<boolean> {
 	try {
-		const [p, t] = await invoke<[number, string]>('get_backend');
-		if (p > 0) {
-			port = p;
-			token = t;
+		const info = await invoke<{
+			configured: boolean;
+			port: number | null;
+			token: string | null;
+		}>('get_backend', { diagnostic: false });
+		if (info.configured && info.port && info.token) {
+			port = info.port;
+			token = info.token;
 			status = 'ready';
 			error = '';
 			return true;
 		}
+		// Configured=false (no READY yet) is not an error — the backend may
+		// still be booting. Stay 'starting' so the retry path keeps working.
 	} catch (e) {
 		// Not ready yet (or running in plain `vite dev` without Tauri).
 		// Don't set status 'error' here — the backend may still be starting.

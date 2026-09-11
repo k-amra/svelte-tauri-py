@@ -144,6 +144,24 @@ def test_jobs_rejects_inverted_dates_with_422():
     assert "from_date" in r.text
 
 
+def test_jobs_rejects_over_max_range_with_422():
+    c = make_client()
+    r = c.post(
+        "/api/jobs",
+        headers=auth_headers(),
+        json={
+            "script": "chat_stats",
+            "params": {
+                "channel": "chan",
+                "from_date": "2020-01-01T00:00:00Z",
+                "to_date": "2024-09-05T00:00:00Z",
+            },
+        },
+    )
+    assert r.status_code == 422
+    assert "max_range_days" in r.text
+
+
 def test_job_events_ring_buffer_caps_and_cursors():
     from app.core.jobs import JobManager
 

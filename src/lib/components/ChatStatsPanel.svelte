@@ -18,6 +18,7 @@
 	let topPhrasesN = $state(20);
 	let sessionGapMinutes = $state(15);
 	let anomalySigma = $state(3.0);
+	let maxRangeDays = $state(366);
 
 	let includeCommands = $state(true);
 	let includeLinks = $state(true);
@@ -32,6 +33,19 @@
 	let includeEngagement = $state(true);
 	let includeAnomalies = $state(true);
 	let includeLanguage = $state(false);
+	let includeCopyPaste = $state(true);
+
+	// Tier 2 toggles — all default off, matching the backend defaults.
+	let includeMentionGraph = $state(false);
+	let includeMutualMentions = $state(false);
+	let includeEmoteCentrality = $state(false);
+	let includeEmoteEntropy = $state(false);
+	let includeLorenz = $state(false);
+	let includeBotScores = $state(false);
+	let includeLengthTrend = $state(false);
+	let includeCohortRetention = $state(false);
+	let includeLanguageByDay = $state(false);
+	let includeQuoteReplies = $state(false);
 
 	let forceRefresh = $state(false);
 	let loading = $state(false);
@@ -71,6 +85,9 @@
 		}
 		if (Number.isNaN(anomalySigma) || anomalySigma < 1.0 || anomalySigma > 6.0) {
 			return 'Anomaly sigma must be between 1.0 and 6.0.';
+		}
+		if (!Number.isInteger(maxRangeDays) || maxRangeDays < 1 || maxRangeDays > 3660) {
+			return 'Max range must be an integer between 1 and 3660 days.';
 		}
 		return null;
 	}
@@ -113,10 +130,22 @@
 				include_engagement: includeEngagement,
 				include_anomalies: includeAnomalies,
 				include_language: includeLanguage,
+				include_copy_paste_chains: includeCopyPaste,
+				// Tier 2 — gated so the backend skips work unless requested.
+				include_mention_graph: includeMentionGraph,
+				include_mutual_mentions: includeMutualMentions,
+				include_emote_centrality: includeEmoteCentrality,
+				include_emote_entropy: includeEmoteEntropy,
+				include_lorenz: includeLorenz,
+				include_bot_scores: includeBotScores,
+				include_length_trend: includeLengthTrend,
+				include_cohort_retention: includeCohortRetention,
+				include_language_by_day: includeLanguageByDay,
+				include_quote_replies: includeQuoteReplies,
 				session_gap_minutes: sessionGapMinutes,
 				anomaly_sigma: anomalySigma,
 				force_refresh: forceRefresh,
-				max_range_days: 366
+				max_range_days: maxRangeDays
 			});
 			const done = await api.waitJob(job.job_id, (j) => {
 				jobProgress = j.progress;
@@ -197,6 +226,62 @@
 	);
 	const maxPhrase = $derived(
 		stats && stats.top_phrases.length > 0 ? Math.max(...stats.top_phrases.map((p) => p.count)) : 1
+	);
+	const maxCopyPaste = $derived(
+		stats && stats.top_copy_paste_chains.length > 0
+			? Math.max(...stats.top_copy_paste_chains.map((c) => c.occurrences))
+			: 1
+	);
+	const maxDiversity = $derived(
+		stats && stats.emote_diversity.length > 0
+			? Math.max(...stats.emote_diversity.map((d) => d.total_emote_uses))
+			: 1
+	);
+	const maxFirstHour = $derived(
+		stats && stats.first_message_hours.length > 0 ? Math.max(1, ...stats.first_message_hours) : 1
+	);
+	const maxNewChatter = $derived(
+		stats && stats.daily_new_chatters.length > 0
+			? Math.max(...stats.daily_new_chatters.map((d) => d.count))
+			: 1
+	);
+	const maxReturningChatter = $derived(
+		stats && stats.daily_returning_chatters.length > 0
+			? Math.max(...stats.daily_returning_chatters.map((d) => d.count))
+			: 1
+	);
+	const maxTrendCount = $derived(
+		stats && stats.trend_by_day.length > 0 ? Math.max(...stats.trend_by_day.map((p) => p.count)) : 1
+	);
+	const maxMentionDegree = $derived(
+		stats && stats.mention_graph.length > 0
+			? Math.max(...stats.mention_graph.map((d) => d.degree))
+			: 1
+	);
+	const maxMutualTotal = $derived(
+		stats && stats.mutual_mention_pairs.length > 0
+			? Math.max(...stats.mutual_mention_pairs.map((p) => p.total))
+			: 1
+	);
+	const maxEmoteCentrality = $derived(
+		stats && stats.emote_centrality.length > 0
+			? Math.max(...stats.emote_centrality.map((c) => c.distinct_co_occurrences))
+			: 1
+	);
+	const maxBotScore = $derived(
+		stats && stats.bot_likelihood.length > 0
+			? Math.max(...stats.bot_likelihood.map((b) => b.score))
+			: 1
+	);
+	const maxQuoteReply = $derived(
+		stats && stats.quote_reply_pairs.length > 0
+			? Math.max(...stats.quote_reply_pairs.map((p) => p.count))
+			: 1
+	);
+	const maxCohortOffset = $derived(
+		stats && stats.cohort_retention.length > 0
+			? Math.max(...stats.cohort_retention.flatMap((r) => r.retention.map((c) => c.week_offset)))
+			: 0
 	);
 </script>
 
@@ -320,6 +405,19 @@
 					class="mt-1"
 				/>
 			</div>
+			<div>
+				<Label for="cs-maxrange">Max range (days)</Label>
+				<Input
+					id="cs-maxrange"
+					type="number"
+					min="1"
+					max="3660"
+					step="1"
+					bind:value={maxRangeDays}
+					class="mt-1"
+					title="Hard ceiling on the requested date range; per-day result arrays grow with it."
+				/>
+			</div>
 		</div>
 
 		<fieldset class="grid grid-cols-2 gap-x-3 gap-y-1 text-sm">
@@ -404,6 +502,13 @@
 					>Phrases</span
 				></label
 			>
+			<label class="flex items-center gap-2"
+				><input
+					type="checkbox"
+					bind:checked={includeCopyPaste}
+					class="accent-primary h-4 w-4"
+				/><span>Copy-paste chains</span></label
+			>
 			<label
 				class="flex items-center gap-2"
 				title="Requires the optional langdetect package on the backend"
@@ -411,6 +516,70 @@
 				<input type="checkbox" bind:checked={includeLanguage} class="accent-primary h-4 w-4" /><span
 					>Language (optional)</span
 				>
+			</label>
+		</fieldset>
+
+		<fieldset class="grid grid-cols-2 gap-x-3 gap-y-1 text-sm">
+			<legend class="mb-1 text-sm font-medium">Advanced (Tier 2)</legend>
+			<label class="flex items-center gap-2">
+				<input type="checkbox" bind:checked={includeMentionGraph} class="accent-primary h-4 w-4" />
+				<span>Mention graph</span>
+			</label>
+			<label class="flex items-center gap-2">
+				<input
+					type="checkbox"
+					bind:checked={includeMutualMentions}
+					class="accent-primary h-4 w-4"
+				/>
+				<span>Mutual mentions</span>
+			</label>
+			<label class="flex items-center gap-2">
+				<input
+					type="checkbox"
+					bind:checked={includeEmoteCentrality}
+					class="accent-primary h-4 w-4"
+				/>
+				<span>Emote centrality</span>
+			</label>
+			<label class="flex items-center gap-2">
+				<input type="checkbox" bind:checked={includeEmoteEntropy} class="accent-primary h-4 w-4" />
+				<span>Emote entropy</span>
+			</label>
+			<label class="flex items-center gap-2">
+				<input type="checkbox" bind:checked={includeLorenz} class="accent-primary h-4 w-4" />
+				<span>Lorenz curve</span>
+			</label>
+			<label class="flex items-center gap-2">
+				<input type="checkbox" bind:checked={includeBotScores} class="accent-primary h-4 w-4" />
+				<span>Bot likelihood</span>
+			</label>
+			<label class="flex items-center gap-2">
+				<input type="checkbox" bind:checked={includeLengthTrend} class="accent-primary h-4 w-4" />
+				<span>Length trend</span>
+			</label>
+			<label class="flex items-center gap-2">
+				<input
+					type="checkbox"
+					bind:checked={includeCohortRetention}
+					class="accent-primary h-4 w-4"
+				/>
+				<span>Cohort retention</span>
+			</label>
+			<label class="flex items-center gap-2">
+				<input type="checkbox" bind:checked={includeQuoteReplies} class="accent-primary h-4 w-4" />
+				<span>Quote replies</span>
+			</label>
+			<label
+				class="flex items-center gap-2"
+				title="Also requires 'Language (optional)' to be enabled"
+			>
+				<input
+					type="checkbox"
+					bind:checked={includeLanguageByDay}
+					disabled={!includeLanguage}
+					class="accent-primary h-4 w-4"
+				/>
+				<span>Language by day</span>
 			</label>
 		</fieldset>
 
@@ -466,6 +635,13 @@
 					Result truncated: channel exceeded the fetch cap — stats cover a partial window.
 				</p>
 			{/if}
+			{#if stats.warnings.length > 0}
+				<div class="rounded border border-amber-500/40 bg-amber-500/10 p-2">
+					{#each stats.warnings as warning (warning)}
+						<p class="text-sm text-amber-500">{warning}</p>
+					{/each}
+				</div>
+			{/if}
 
 			<div class="grid grid-cols-2 gap-2 text-center">
 				<div class="bg-muted rounded p-2">
@@ -494,9 +670,35 @@
 				</div>
 				<div class="bg-muted rounded p-2">
 					<div class="text-xl font-bold">
+						{stats.max_message_length != null ? stats.max_message_length.toLocaleString() : '—'}
+					</div>
+					<div class="text-muted-foreground text-xs">max length</div>
+				</div>
+				<div class="bg-muted rounded p-2">
+					<div class="text-xl font-bold">
 						{stats.avg_words_per_message != null ? stats.avg_words_per_message.toFixed(1) : '—'}
 					</div>
 					<div class="text-muted-foreground text-xs">avg words / msg</div>
+				</div>
+				<div class="bg-muted rounded p-2">
+					<div class="text-xl font-bold">
+						{stats.vocab_richness != null ? stats.vocab_richness.toFixed(3) : '—'}
+					</div>
+					<div class="text-muted-foreground text-xs">
+						vocab richness ({stats.unique_word_count.toLocaleString()} unique)
+					</div>
+				</div>
+				<div class="bg-muted rounded p-2">
+					<div class="text-xl font-bold">
+						{stats.peak_concurrent_chatters != null
+							? stats.peak_concurrent_chatters.toLocaleString()
+							: '—'}
+					</div>
+					<div class="text-muted-foreground text-xs">
+						peak concurrent{#if stats.peak_concurrent_window}
+							<span title={new Date(stats.peak_concurrent_window).toLocaleString()}> (5m)</span>
+						{/if}
+					</div>
 				</div>
 			</div>
 
@@ -586,6 +788,76 @@
 				</div>
 			</div>
 
+			{#if stats.daily_new_chatters.length > 0 || stats.daily_returning_chatters.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">New vs returning chatters (per day)</p>
+					<div class="space-y-2">
+						{#if stats.daily_new_chatters.length > 0}
+							<div>
+								<p class="text-muted-foreground text-xs">New</p>
+								<div class="bg-muted flex h-10 items-end gap-0.5 overflow-x-auto rounded p-1">
+									{#each stats.daily_new_chatters as day (day.date)}
+										<div
+											class="min-w-1.5 flex-1 rounded-t bg-emerald-500"
+											style="height: {Math.max(3, (day.count / maxNewChatter) * 100)}%"
+											title="{day.date} — {day.count} new"
+										></div>
+									{/each}
+								</div>
+							</div>
+						{/if}
+						{#if stats.daily_returning_chatters.length > 0}
+							<div>
+								<p class="text-muted-foreground text-xs">Returning</p>
+								<div class="bg-muted flex h-10 items-end gap-0.5 overflow-x-auto rounded p-1">
+									{#each stats.daily_returning_chatters as day (day.date)}
+										<div
+											class="min-w-1.5 flex-1 rounded-t bg-sky-500"
+											style="height: {Math.max(3, (day.count / maxReturningChatter) * 100)}%"
+											title="{day.date} — {day.count} returning"
+										></div>
+									{/each}
+								</div>
+							</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			{#if stats.weekly_seasonality}
+				<div>
+					<p class="mb-1 text-sm font-medium">Weekly seasonality (vs trend)</p>
+					<div class="grid grid-cols-7 gap-0.5">
+						{#each stats.weekly_seasonality as mult, d (WEEKDAY_LABELS[d])}
+							<div
+								class="rounded p-1 text-center text-[10px] {mult >= 1
+									? 'bg-green-500/70'
+									: 'bg-red-500/70'}"
+								style="opacity: {0.25 + 0.75 * Math.min(1, Math.abs(1 - mult) * 4)}"
+								title="{WEEKDAY_LABELS[d]}: {mult}× trend"
+							>
+								{WEEKDAY_LABELS[d]}
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			{#if stats.trend_by_day.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Trend (7-day centered moving average)</p>
+					<div class="bg-muted flex h-16 items-end gap-0.5 overflow-x-auto rounded p-1">
+						{#each stats.trend_by_day as p (p.date)}
+							<div
+								class="min-w-1.5 flex-1 rounded-t bg-amber-500"
+								style="height: {Math.max(3, (p.count / maxTrendCount) * 100)}%"
+								title="{p.date} — trend {p.count.toFixed(1)}"
+							></div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
 			{#if stats.top_peaks_5m.length > 0}
 				<div>
 					<p class="mb-1 text-sm font-medium">Peak 5-minute windows</p>
@@ -598,7 +870,28 @@
 			{/if}
 
 			<div>
-				<p class="mb-1 text-sm font-medium">Top words</p>
+				<p class="mb-1 text-sm font-medium">First message by hour (UTC, in-range first seen)</p>
+				<div class="flex h-20 items-end gap-0.5">
+					{#each stats.first_message_hours as count, h (h)}
+						<div
+							class="flex-1 rounded-t bg-teal-500"
+							style="height: {Math.max(2, (count / maxFirstHour) * 100)}%"
+							title="{h}:00 — {count}"
+						></div>
+					{/each}
+				</div>
+			</div>
+
+			<div>
+				<p class="mb-1 text-sm font-medium">
+					Top words{#if stats.hapax_ratio != null || stats.zipf_slope != null}
+						<span class="text-muted-foreground font-normal">
+							{#if stats.hapax_ratio != null}
+								· hapax {stats.hapax_ratio}{/if}{#if stats.zipf_slope != null}
+								· Zipf {stats.zipf_slope}{/if}
+						</span>
+					{/if}
+				</p>
 				<div class="space-y-1">
 					{#each stats.top_words as w (w.word)}
 						<div class="flex items-center gap-2 text-xs">
@@ -626,6 +919,29 @@
 									></div>
 								</div>
 								<span class="w-12 text-right">{e.count.toLocaleString()}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			{#if stats.emote_diversity.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Emote diversity (Twitch emotes, 5+ uses)</p>
+					<div class="space-y-1">
+						{#each stats.emote_diversity.slice(0, 5) as d (d.user_id)}
+							<div class="flex items-center gap-2 text-xs">
+								<span
+									class="w-24 truncate"
+									title="{d.unique_emotes} unique / {d.total_emote_uses} uses">{d.username}</span
+								>
+								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
+									<div
+										class="h-full bg-purple-500"
+										style="width: {(d.total_emote_uses / maxDiversity) * 100}%"
+									></div>
+								</div>
+								<span class="w-12 text-right">{d.diversity_ratio.toFixed(2)}</span>
 							</div>
 						{/each}
 					</div>
@@ -748,6 +1064,32 @@
 				</div>
 			{/if}
 
+			{#if stats.top_copy_paste_chains.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">
+						Copy-paste chains ({stats.cross_user_copy_paste_count} reposts across {stats.cross_user_copy_paste_texts}
+						texts)
+					</p>
+					<div class="space-y-1">
+						{#each stats.top_copy_paste_chains as c (c.text)}
+							<div class="flex items-center gap-2 text-xs">
+								<span class="flex-1 truncate" title={c.text}
+									>{c.text}
+									<span class="text-muted-foreground">· {c.distinct_users} users</span></span
+								>
+								<div class="bg-muted h-3 w-24 overflow-hidden rounded">
+									<div
+										class="h-full bg-rose-500"
+										style="width: {(c.occurrences / maxCopyPaste) * 100}%"
+									></div>
+								</div>
+								<span class="w-12 text-right">{c.occurrences.toLocaleString()}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
 			{#if stats.roles.length > 0}
 				<div>
 					<p class="mb-1 text-sm font-medium">Roles</p>
@@ -767,7 +1109,9 @@
 					<p class="text-muted-foreground">
 						{stats.sessions.total_sessions} sessions · avg {stats.sessions.avg_messages_per_session?.toFixed(
 							1
-						) ?? '—'} msgs · avg {stats.sessions.avg_session_minutes?.toFixed(1) ?? '—'} min · longest
+						) ?? '—'} msgs · avg {stats.sessions.avg_session_minutes?.toFixed(1) ?? '—'} min · median
+						{stats.sessions.median_session_minutes?.toFixed(1) ?? '—'} min · p90
+						{stats.sessions.p90_session_minutes?.toFixed(1) ?? '—'} min · longest
 						{stats.sessions.longest_session_minutes?.toFixed(1) ?? '—'} min
 					</p>
 				</div>
@@ -789,6 +1133,13 @@
 					? {stats.message_classes.questions} · ! {stats.message_classes.exclamations} · CAPS {stats
 						.message_classes.all_caps} · emote-only {stats.message_classes.emote_only} · short {stats
 						.message_classes.short_messages} · long {stats.message_classes.long_messages}
+				</p>
+				<p class="text-muted-foreground">
+					self-repeats {stats.self_repetition_count}{stats.self_repetition_pct != null
+						? ` (${stats.self_repetition_pct}%)`
+						: ''} · non-ASCII {stats.messages_with_non_ascii}{stats.non_ascii_ratio != null
+						? ` (${(stats.non_ascii_ratio * 100).toFixed(1)}% of chars)`
+						: ''}
 				</p>
 			</div>
 
@@ -818,7 +1169,8 @@
 					<ul class="text-xs">
 						{#each stats.anomalies_5m.slice(0, 10) as a (a.window_start)}
 							<li>
-								{new Date(a.window_start).toLocaleString()} — {a.message_count} msgs (z {a.z_score})
+								{new Date(a.window_start).toLocaleString()} — {a.message_count} msgs (z {a.z_score},
+								p {a.p_value})
 							</li>
 						{/each}
 					</ul>
@@ -833,6 +1185,187 @@
 							<li>{l.language}: {l.percentage}%</li>
 						{/each}
 					</ul>
+				</div>
+			{/if}
+
+			{#if stats.emote_entropy != null}
+				<div class="text-xs">
+					<p class="mb-1 text-sm font-medium">Emote entropy</p>
+					<p class="text-muted-foreground">{stats.emote_entropy} bits</p>
+				</div>
+			{/if}
+
+			{#if stats.message_length_trend_slope != null}
+				<div class="text-xs">
+					<p class="mb-1 text-sm font-medium">Message length trend</p>
+					<p class="text-muted-foreground">
+						{stats.message_length_trend_slope >= 0 ? '+' : ''}{stats.message_length_trend_slope} chars/day
+					</p>
+				</div>
+			{/if}
+
+			{#if stats.lorenz_samples.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Lorenz curve (message share by top %)</p>
+					<ul class="text-xs">
+						{#each stats.lorenz_samples as s (s.top_pct)}
+							<li>top {s.top_pct}% → {s.message_share_pct}% of messages</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
+
+			{#if stats.mention_graph.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Mention graph (in/out degree)</p>
+					<div class="space-y-1">
+						{#each stats.mention_graph as node (node.username)}
+							<div class="flex items-center gap-2 text-xs">
+								<span class="w-24 truncate" title="in {node.mentions_in} / out {node.mentions_out}"
+									>{node.username}</span
+								>
+								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
+									<div
+										class="h-full bg-emerald-500"
+										style="width: {(node.degree / maxMentionDegree) * 100}%"
+									></div>
+								</div>
+								<span class="w-12 text-right">{node.degree}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			{#if stats.mutual_mention_pairs.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Mutual mentions</p>
+					<div class="space-y-1">
+						{#each stats.mutual_mention_pairs as p (`${p.user_a}-${p.user_b}`)}
+							<div class="flex items-center gap-2 text-xs">
+								<span class="w-32 truncate" title="{p.user_a} ↔ {p.user_b}"
+									>{p.user_a} ↔ {p.user_b}</span
+								>
+								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
+									<div
+										class="h-full bg-emerald-500"
+										style="width: {(p.total / maxMutualTotal) * 100}%"
+									></div>
+								</div>
+								<span class="w-16 text-right">{p.count_ab}/{p.count_ba}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			{#if stats.emote_centrality.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Emote centrality (distinct co-occurrences)</p>
+					<div class="space-y-1">
+						{#each stats.emote_centrality as c (c.emote)}
+							<div class="flex items-center gap-2 text-xs">
+								<span class="w-24 truncate">{c.emote}</span>
+								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
+									<div
+										class="h-full bg-purple-500"
+										style="width: {(c.distinct_co_occurrences / maxEmoteCentrality) * 100}%"
+									></div>
+								</div>
+								<span class="w-12 text-right">{c.distinct_co_occurrences}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			{#if stats.bot_likelihood.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Bot likelihood (heuristic)</p>
+					<div class="space-y-1">
+						{#each stats.bot_likelihood as b (b.user_id)}
+							<div class="flex items-center gap-2 text-xs">
+								<span class="w-24 truncate" title={b.signals.join(', ')}>{b.username}</span>
+								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
+									<div
+										class="h-full bg-red-500"
+										style="width: {(b.score / maxBotScore) * 100}%"
+									></div>
+								</div>
+								<span class="w-12 text-right">{b.score.toFixed(2)}</span>
+								<span class="text-muted-foreground truncate">{b.signals.join(', ')}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			{#if stats.quote_reply_pairs.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">
+						Quote replies ({stats.quote_reply_count} inferred)
+					</p>
+					<div class="space-y-1">
+						{#each stats.quote_reply_pairs as p (`${p.from_user}-${p.to_user}`)}
+							<div class="flex items-center gap-2 text-xs">
+								<span class="w-32 truncate">{p.from_user} → {p.to_user}</span>
+								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
+									<div
+										class="h-full bg-teal-500"
+										style="width: {(p.count / maxQuoteReply) * 100}%"
+									></div>
+								</div>
+								<span class="w-12 text-right">{p.count}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
+			{#if stats.language_by_day.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Top language per day</p>
+					<ul class="text-xs">
+						{#each stats.language_by_day as d (d.date)}
+							<li>{d.date} — {d.language} ({d.percentage}%)</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
+
+			{#if stats.cohort_retention.length > 0}
+				<div>
+					<p class="mb-1 text-sm font-medium">Weekly cohort retention (%)</p>
+					<div class="overflow-x-auto">
+						<table class="text-[10px]">
+							<thead>
+								<tr class="text-muted-foreground">
+									<th class="pr-2 text-left font-medium">Cohort</th>
+									<th class="pr-2 text-right font-medium">Size</th>
+									{#each Array.from({ length: maxCohortOffset + 1 }, (_, i) => i) as w (w)}
+										<th class="pr-2 text-right font-medium">W{w}</th>
+									{/each}
+								</tr>
+							</thead>
+							<tbody>
+								{#each stats.cohort_retention as row (row.cohort_week)}
+									<tr>
+										<td class="pr-2">{row.cohort_week}</td>
+										<td class="pr-2 text-right">{row.cohort_size}</td>
+										{#each Array.from({ length: maxCohortOffset + 1 }, (_, i) => i) as w (w)}
+											{@const cell = row.retention.find((c) => c.week_offset === w)}
+											<td
+												class="pr-2 text-right"
+												style="opacity: {cell ? 0.3 + 0.7 * (cell.retention_pct / 100) : 0.2}"
+											>
+												{cell ? cell.retention_pct.toFixed(0) : '—'}
+											</td>
+										{/each}
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
 				</div>
 			{/if}
 		{/if}

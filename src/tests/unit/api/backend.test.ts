@@ -36,11 +36,18 @@ describe('backend store', () => {
 		expect(backend.error).toContain('backend not ready yet');
 	});
 
+	it('stays starting when get_backend reports unconfigured (no READY yet)', async () => {
+		mockInvoke.mockResolvedValueOnce({ configured: false, port: null, token: null });
+		await backend.init();
+		expect(backend.ready).toBe(false);
+		expect(backend.status).toBe('starting');
+	});
+
 	it('init() becomes ready when get_backend returns port+token', async () => {
 		await backend.dispose();
-		mockInvoke.mockResolvedValueOnce([4321, 'tok']);
+		mockInvoke.mockResolvedValueOnce({ configured: true, port: 4321, token: 'tok' });
 		await backend.init();
-		expect(mockInvoke).toHaveBeenCalledWith('get_backend');
+		expect(mockInvoke).toHaveBeenCalledWith('get_backend', { diagnostic: false });
 		expect(backend.ready).toBe(true);
 		expect(backend.port).toBe(4321);
 		expect(backend.status).toBe('ready');
@@ -52,7 +59,7 @@ describe('backend store', () => {
 
 	it("backend-gone clears state and sets status 'error'", async () => {
 		await backend.dispose();
-		mockInvoke.mockResolvedValueOnce([4321, 'tok']);
+		mockInvoke.mockResolvedValueOnce({ configured: true, port: 4321, token: 'tok' });
 		await backend.init();
 		expect(backend.ready).toBe(true);
 
@@ -67,7 +74,7 @@ describe('backend store', () => {
 
 	it('stale backend-ready events are ignored after dispose', async () => {
 		await backend.dispose();
-		mockInvoke.mockResolvedValueOnce([4321, 'tok']);
+		mockInvoke.mockResolvedValueOnce({ configured: true, port: 4321, token: 'tok' });
 		await backend.init();
 		const onReady = listenHandler('backend-ready');
 		const portBefore = backend.port;

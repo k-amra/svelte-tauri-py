@@ -232,7 +232,9 @@ def test_range_clamped_to_logged_history(monkeypatch):
     monkeypatch.setattr(chat_stats, "channel_log_days", fake_days)
 
     notes: list = []
-    params = _params(datetime(2020, 1, 1, tzinfo=UTC), datetime(2024, 9, 5, 23, 0, tzinfo=UTC))
+    params = _params(
+        datetime(2020, 1, 1, tzinfo=UTC), datetime(2024, 9, 5, 23, 0, tzinfo=UTC), max_range_days=2000
+    )
     result = chat_stats.run(params, progress=lambda pct, msg="": notes.append(msg))
 
     assert result.total_messages == 5
