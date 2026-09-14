@@ -311,11 +311,15 @@ fn spawn_dev(app: &AppHandle, token: &str, data_dir: &str) {
     let token = token.to_string();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let mut ready_sent = false;
         for line in reader.lines().map_while(Result::ok) {
             let line = line.trim().to_string();
             log::debug!("[sidecar-dev] {line}");
-            if let Some(port) = parse_ready_line(&line) {
-                on_ready(&handle, port, token.clone());
+            if !ready_sent {
+                if let Some(port) = parse_ready_line(&line) {
+                    ready_sent = true;
+                    on_ready(&handle, port, token.clone());
+                }
             }
         }
         // stdout closed → process is gone (or about to be). Mirror the
