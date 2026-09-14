@@ -162,8 +162,16 @@
 			if (filterOnlyFirstMsg && !isFirstMsg(m)) return false;
 			if (filterOnlyReturning && !isReturningChatter(m)) return false;
 			const len = m.text.length;
-			if (filterMinLength != null && len < filterMinLength) return false;
-			if (filterMaxLength != null && len > filterMaxLength) return false;
+			const minLen =
+				typeof filterMinLength === 'number' && !Number.isNaN(filterMinLength)
+					? filterMinLength
+					: null;
+			const maxLen =
+				typeof filterMaxLength === 'number' && !Number.isNaN(filterMaxLength)
+					? filterMaxLength
+					: null;
+			if (minLen !== null && len < minLen) return false;
+			if (maxLen !== null && len > maxLen) return false;
 			return true;
 		});
 	});
