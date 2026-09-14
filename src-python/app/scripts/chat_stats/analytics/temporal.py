@@ -68,7 +68,14 @@ def compute_time(df: pl.DataFrame) -> dict:
         max_date = df["ts"].max().date()
         per_day = df.group_by(pl.col("ts").dt.date().alias("day")).len()
         all_days = pl.date_range(min_date, max_date, interval="1d", eager=True).alias("day")
-        full_days = pl.DataFrame({"day": all_days}).join(per_day, on="day", how="left").fill_null(0)
+        full_days = (
+            pl.DataFrame({"day": all_days})
+            .join(per_day, on="day", how="left")
+            .fill_null(0)
+            # Polars hash joins do not guarantee left-order preservation;
+            # downstream moving-average math requires ascending days.
+            .sort("day")
+        )
         messages_per_day = [
             {"date": day.isoformat(), "count": int(count)}
             for day, count in zip(full_days["day"].to_list(), full_days["len"].to_list(), strict=True)
@@ -154,8 +161,12 @@ def compute_new_returning(df: pl.DataFrame) -> dict:
     all_days = pl.date_range(min_day, max_day, interval="1d", eager=True).alias("day")
     all_days_df = pl.DataFrame({"day": all_days})
 
-    new_full = all_days_df.join(new_counts, on="day", how="left").fill_null(0)
-    returning_full = all_days_df.join(returning_counts, on="day", how="left").fill_null(0)
+    new_full = (
+        all_days_df.join(new_counts, on="day", how="left").fill_null(0).sort("day")
+    )
+    returning_full = (
+        all_days_df.join(returning_counts, on="day", how="left").fill_null(0).sort("day")
+    )
 
     daily_new = [
         {"date": d.isoformat(), "count": int(c)}

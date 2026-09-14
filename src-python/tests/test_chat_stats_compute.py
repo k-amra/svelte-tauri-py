@@ -689,6 +689,24 @@ def test_quote_reply_window_boundary():
     assert stats["quote_reply_pairs"] == [{"from_user": "a", "to_user": "bob", "count": 1}]
 
 
+def test_daily_arrays_are_chronological_after_left_joins():
+    # Gappy 10-day span: the left join against the full day range must still
+    # emit strictly ascending dates for the moving-average math downstream.
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "day zero", base),
+        ("b", "day four", base + timedelta(days=4)),
+        ("a", "day nine", base + timedelta(days=9)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(), {})
+    mpd = stats["messages_per_day"]
+    assert [d["date"] for d in mpd] == sorted(d["date"] for d in mpd)
+    assert len(mpd) == 10
+    assert [d["count"] for d in mpd] == [1, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    assert [d["date"] for d in stats["daily_new_chatters"]] == [d["date"] for d in mpd]
+    assert [d["date"] for d in stats["daily_returning_chatters"]] == [d["date"] for d in mpd]
+
+
 def test_zipf_slope_on_power_law():
     # Word i occurs ~(30/(i+1)) times: Zipf with slope ≈ -1 by construction.
     base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
