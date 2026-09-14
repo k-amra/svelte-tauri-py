@@ -97,19 +97,30 @@ async function* readSSE(
 		while (true) {
 			const { value, done } = await reader.read();
 			if (done) break;
-			buf += decoder.decode(value, { stream: true });
+			// Normalize CRLF and bare CR to LF so frame separation is uniform
+			// regardless of intermediate proxy / webview line-ending choices.
+			buf += decoder.decode(value, { stream: true }).replace(/\r\n|\r/g, '\n');
 
 			let sep: number;
 			while ((sep = buf.indexOf('\n\n')) >= 0) {
 				const frame = buf.slice(0, sep);
 				buf = buf.slice(sep + 2);
 				let event = 'message';
-				let data = '';
+				const dataLines: string[] = [];
 				for (const line of frame.split('\n')) {
-					if (line.startsWith('event:')) event = line.slice(6).trim();
-					else if (line.startsWith('data:')) data += line.slice(5);
+					if (line.startsWith('event:')) {
+						event = line.slice(6).trim();
+					} else if (line.startsWith('data:')) {
+						// SSE spec: strip exactly one leading space after the colon.
+						const raw = line.slice(5);
+						dataLines.push(raw.startsWith(' ') ? raw.slice(1) : raw);
+					}
 				}
-				if (event || data) yield { event, data };
+				// Multi-line data fields are joined with '\n' per the SSE spec.
+				const data = dataLines.join('\n');
+				// Yield terminal events even with empty data so callers can
+				// still detect stream closure; skip empty progress frames.
+				if (data || event !== 'message') yield { event, data };
 			}
 		}
 	} finally {

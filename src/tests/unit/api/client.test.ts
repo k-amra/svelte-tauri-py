@@ -105,6 +105,23 @@ describe('api client', () => {
 		);
 	});
 
+	it('waitJob() parses CRLF-delimited SSE frames', async () => {
+		const done = jobStatus({ status: 'done', progress: 100, message: 'done', result: { n: 1 } });
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(jobStatus()), { status: 200 }));
+		fetchSpy.mockResolvedValueOnce(
+			streamResponse([
+				`data: ${JSON.stringify({ seq: 0, progress: 10, message: 'ten', t: 1 })}\r\n\r\n`,
+				`event: done\r\ndata: ${JSON.stringify(done)}\r\n\r\n`
+			])
+		);
+		const { api } = await import('$lib/api/client');
+		const seen: string[] = [];
+		const result = await api.waitJob('abc123', (j) => seen.push(`${j.progress}:${j.message}`));
+		expect(result).toEqual(done);
+		expect(seen).toEqual(['0:', '10:ten']);
+	});
+
 	it('waitJob() keeps the timeout contract on abort', async () => {
 		// A stream that pends forever, errored by the abort signal —
 		// emulating what a real fetch does when its signal fires mid-read.
