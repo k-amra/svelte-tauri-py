@@ -517,6 +517,87 @@ describe('ChatStatsPanel', () => {
 		});
 	});
 
+	it('channel-card drill switches to the cached per-channel tab without a new job', async () => {
+		const pooled = {
+			...fakeStats,
+			total_messages: 42,
+			channel_summaries: [
+				{
+					channel: 'aaa',
+					total_messages: 30,
+					unique_chatters: 5,
+					top_chatters: [],
+					top_emotes: [],
+					top_words: [],
+					top_commands: [],
+					top_domains: [],
+					top_mentions: [],
+					roles: [],
+					peak_concurrent_chatters: null,
+					messages_per_day: [],
+					first_message: null,
+					last_message: null
+				},
+				{
+					channel: 'bbb',
+					total_messages: 12,
+					unique_chatters: 2,
+					top_chatters: [],
+					top_emotes: [],
+					top_words: [],
+					top_commands: [],
+					top_domains: [],
+					top_mentions: [],
+					roles: [],
+					peak_concurrent_chatters: null,
+					messages_per_day: [],
+					first_message: null,
+					last_message: null
+				}
+			],
+			per_channel: [
+				{
+					...fakeStats,
+					channel: 'aaa',
+					total_messages: 30,
+					channel_summaries: [],
+					per_channel: []
+				},
+				{
+					...fakeStats,
+					channel: 'bbb',
+					total_messages: 12,
+					channel_summaries: [],
+					per_channel: []
+				}
+			]
+		};
+		mockCreateJob.mockResolvedValueOnce({
+			job_id: 'abc123',
+			script: 'chat_stats',
+			status: 'running',
+			progress: 0,
+			message: '',
+			result: null,
+			error: null
+		});
+		mockWaitJob.mockResolvedValueOnce({ ...doneJob(), result: pooled });
+
+		render(ChatStatsPanel);
+		await fillDates();
+		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
+
+		await waitFor(() => {
+			expect(screen.getByTestId('cs-total')).toHaveTextContent('42');
+		});
+		await fireEvent.click(screen.getByTitle('aaa — click to scope all stats to this channel'));
+		await waitFor(() => {
+			expect(screen.getByTestId('cs-total')).toHaveTextContent('30');
+		});
+		// Served from the in-memory per_channel result — no second job.
+		expect(mockCreateJob).toHaveBeenCalledTimes(1);
+	});
+
 	it('badges pooled top chatters with their channels and keeps the tab bar sticky', async () => {
 		const pooled = {
 			...fakeStats,

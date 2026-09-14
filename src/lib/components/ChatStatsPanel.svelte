@@ -241,6 +241,14 @@
 	}
 
 	function drillChannel(channel: string) {
+		// The backend already returned full isolated stats per channel in
+		// `stats.per_channel`; re-running the job for a channel we already
+		// have in memory is pure waste. Only fall through to a fresh run
+		// when the channel wasn't part of the original pooled request.
+		if (stats?.per_channel.some((c) => c.channel === channel)) {
+			activeChannelTab = channel;
+			return;
+		}
 		setScope(channel);
 	}
 
