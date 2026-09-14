@@ -56,6 +56,12 @@
 			<li class="shrink-0">
 				<a
 					href="#{s.id}"
+					onclick={() => {
+						// Anchor navigation alone doesn't open a closed <details>;
+						// the user lands on a collapsed section with no visible content.
+						const el = document.getElementById(s.id);
+						if (el instanceof HTMLDetailsElement && !el.open) el.open = true;
+					}}
 					class="rounded px-2.5 py-1 transition-colors {current === s.id
 						? 'bg-primary text-primary-foreground'
 						: 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
