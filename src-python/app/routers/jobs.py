@@ -52,7 +52,19 @@ async def job_events(job_id: str):
         while True:
             batch = jobs.events_since(job_id, seen)
             if batch is None:
-                yield f"event: error\ndata: {json.dumps({'error': 'unknown job'})}\n\n"
+                # Shape the terminal error frame like a JobStatus so the
+                # client's `JSON.parse(msg.data) as JobStatus` path stays
+                # type-correct (e.g. its polling fallback reads .status).
+                error_snapshot = {
+                    "job_id": job_id,
+                    "script": "",
+                    "status": "error",
+                    "progress": 0.0,
+                    "message": "",
+                    "result": None,
+                    "error": f"unknown job: {job_id}",
+                }
+                yield f"event: error\ndata: {json.dumps(error_snapshot)}\n\n"
                 return
             events, status, snapshot = batch
             for ev in events:

@@ -124,6 +124,50 @@ def test_to_date_is_exclusive(monkeypatch):
     assert result.total_messages == 10
 
 
+def test_truncated_span_does_not_claim_completed_coverage(monkeypatch):
+    """Two disjoint gaps where only the FIRST truncates: the truncated span's
+    coverage must stop at its own high-water mark, and the completed span must
+    still claim its full range. A follow-up run over the never-fetched days
+    must hit the network again (under the old global-max coverage it would
+    have been falsely served from cache)."""
+    pool = _september_pool()
+    calls: list = []
+
+    async def fake_fetch(api, channel_id_type, channel, from_date, to_date, **kwargs):
+        calls.append((from_date, to_date))
+        msgs = [m for m in pool if from_date <= m.timestamp <= to_date]
+        # The first gap (Sep 1–6 area) truncates: only Sep 1–2 arrive.
+        if to_date <= datetime(2024, 9, 6, 0, 10, tzinfo=UTC):
+            return (
+                [m for m in msgs if m.timestamp <= datetime(2024, 9, 2, 12, 0, tzinfo=UTC)],
+                True,
+            )
+        return msgs, False
+
+    async def fake_emotes(channel_name, user_id):
+        return {}
+
+    monkeypatch.setattr(fetcher, "fetch_channel_logs", fake_fetch)
+    monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
+
+    # Seed the middle so the Sep 1–25 run splits into two disjoint gaps.
+    chat_stats.run(_params(datetime(2024, 9, 6, tzinfo=UTC), datetime(2024, 9, 19, 23, 0, tzinfo=UTC)))
+    chat_stats.run(_params(datetime(2024, 9, 1, tzinfo=UTC), datetime(2024, 9, 25, 23, 0, tzinfo=UTC)))
+
+    _, meta = log_cache.load_month("channel", "chan", 2024, 9)
+    cov = meta["coverage"]
+    # Truncated span attests only to its high-water mark (Sep 2 12:00).
+    assert cov[0] == ["2024-09-01T00:00:00+00:00", "2024-09-02T12:00:00+00:00"]
+    # The completed span (merged with the seeded middle) claims its full range.
+    assert cov[1][0] == "2024-09-06T00:00:00+00:00"
+    assert cov[1][1] == "2024-09-25T23:00:00+00:00"
+
+    # Sep 3–5 was never fetched — a follow-up run must go back to the network.
+    n_before = len(calls)
+    chat_stats.run(_params(datetime(2024, 9, 3, tzinfo=UTC), datetime(2024, 9, 5, 23, 0, tzinfo=UTC)))
+    assert len(calls) > n_before
+
+
 def test_shifted_range_within_month_reuses_chunk(monkeypatch):
     """1.09–10.09 then 2.09–10.09: the second run downloads nothing."""
     calls: list = []

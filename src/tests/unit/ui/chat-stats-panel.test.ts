@@ -71,6 +71,21 @@ const fakeStats: ChatStatsResult = {
 	duplicate_message_count: 2,
 	top_repeated_messages: [{ text: 'hello', count: 3 }],
 	roles: [{ role: 'regular', messages: 40, unique_users: 7 }],
+	staff_list: [
+		{
+			user_id: '2',
+			username: 'mod1',
+			role: 'moderator',
+			messageCount: 12,
+			firstSeen: '2025-01-01T00:01:00+00:00',
+			lastSeen: '2025-01-02T00:01:00+00:00'
+		}
+	],
+	subscriber_list: [],
+	subscriber_count: 0,
+	previous_period: null,
+	channel_summaries: [],
+	per_channel: [],
 	sessions: {
 		total_sessions: 2,
 		avg_messages_per_session: 21,
@@ -231,7 +246,9 @@ describe('ChatStatsPanel', () => {
 					include_length_trend: false,
 					include_cohort_retention: false,
 					include_language_by_day: false,
-					include_quote_replies: false
+					include_quote_replies: false,
+					include_subscriber_list: false,
+					compare_previous: false
 				})
 			);
 		});
@@ -244,7 +261,8 @@ describe('ChatStatsPanel', () => {
 		expect(screen.getByText('Kappa')).toBeInTheDocument();
 		expect(screen.getByText('Top emote pairs')).toBeInTheDocument();
 		expect(screen.getByText(/Top commands/)).toBeInTheDocument();
-		expect(screen.getByText(/Copy-paste chains \(2 reposts/)).toBeInTheDocument();
+		expect(screen.getAllByText('Copy-paste chains').length).toBeGreaterThan(0);
+		expect(screen.getByText('2 reposts / 1 texts')).toBeInTheDocument();
 		expect(screen.getByText('raid incoming')).toBeInTheDocument();
 		expect(
 			screen.getByText('First message by hour (UTC, in-range first seen)')
@@ -266,7 +284,8 @@ describe('ChatStatsPanel', () => {
 		expect(screen.getByText('Message length trend')).toBeInTheDocument();
 		expect(screen.getByText('Weekly cohort retention (%)')).toBeInTheDocument();
 		expect(screen.getByText('Top language per day')).toBeInTheDocument();
-		expect(screen.getByText('Quote replies (1 inferred)')).toBeInTheDocument();
+		expect(screen.getAllByText('Quote replies').length).toBeGreaterThan(0);
+		expect(screen.getByText('1 inferred')).toBeInTheDocument();
 	});
 
 	it('labels the download phase in plain language', async () => {
@@ -404,7 +423,7 @@ describe('ChatStatsPanel', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
 
 		await waitFor(() => {
-			expect(screen.getByText('Channel is required.')).toBeInTheDocument();
+			expect(screen.getByText('At least one channel is required.')).toBeInTheDocument();
 		});
 		expect(mockCreateJob).not.toHaveBeenCalled();
 	});
@@ -447,5 +466,140 @@ describe('ChatStatsPanel', () => {
 			).toBeInTheDocument();
 		});
 		expect(mockCreateJob).not.toHaveBeenCalled();
+	});
+
+	it('switches between pooled and per-channel tabs without a second job', async () => {
+		const pooled = {
+			...fakeStats,
+			total_messages: 42,
+			per_channel: [
+				{
+					...fakeStats,
+					channel: 'aaa',
+					total_messages: 30,
+					channel_summaries: [],
+					per_channel: []
+				},
+				{ ...fakeStats, channel: 'bbb', total_messages: 12, channel_summaries: [], per_channel: [] }
+			]
+		};
+		mockCreateJob.mockResolvedValueOnce({
+			job_id: 'abc123',
+			script: 'chat_stats',
+			status: 'running',
+			progress: 0,
+			message: '',
+			result: null,
+			error: null
+		});
+		mockWaitJob.mockResolvedValueOnce({ ...doneJob(), result: pooled });
+
+		render(ChatStatsPanel);
+		await fillDates();
+		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
+
+		await waitFor(() => {
+			expect(screen.getByRole('button', { name: 'Pooled (All Channels)' })).toBeInTheDocument();
+		});
+		expect(screen.getByRole('button', { name: 'aaa' })).toBeInTheDocument();
+		expect(screen.getByTestId('cs-total')).toHaveTextContent('42');
+
+		await fireEvent.click(screen.getByRole('button', { name: 'aaa' }));
+		await waitFor(() => {
+			expect(screen.getByTestId('cs-total')).toHaveTextContent('30');
+		});
+		// No second backend run for a view-only tab switch.
+		expect(mockCreateJob).toHaveBeenCalledTimes(1);
+
+		await fireEvent.click(screen.getByRole('button', { name: 'bbb' }));
+		await waitFor(() => {
+			expect(screen.getByTestId('cs-total')).toHaveTextContent('12');
+		});
+	});
+
+	it('badges pooled top chatters with their channels and keeps the tab bar sticky', async () => {
+		const pooled = {
+			...fakeStats,
+			total_messages: 42,
+			top_chatters: [
+				{ ...fakeStats.top_chatters[0], channels: ['aaa', 'bbb'] },
+				{ ...fakeStats.top_chatters[1], channels: ['aaa'] }
+			],
+			channel_summaries: [
+				{
+					channel: 'aaa',
+					total_messages: 30,
+					unique_chatters: 5,
+					top_chatters: [],
+					top_emotes: [],
+					top_words: [],
+					top_commands: [],
+					top_domains: [],
+					top_mentions: [],
+					roles: [],
+					peak_concurrent_chatters: null,
+					messages_per_day: [],
+					first_message: null,
+					last_message: null
+				},
+				{
+					channel: 'bbb',
+					total_messages: 12,
+					unique_chatters: 2,
+					top_chatters: [],
+					top_emotes: [],
+					top_words: [],
+					top_commands: [],
+					top_domains: [],
+					top_mentions: [],
+					roles: [],
+					peak_concurrent_chatters: null,
+					messages_per_day: [],
+					first_message: null,
+					last_message: null
+				}
+			],
+			per_channel: [
+				{
+					...fakeStats,
+					channel: 'aaa',
+					total_messages: 30,
+					channel_summaries: [],
+					per_channel: []
+				},
+				{
+					...fakeStats,
+					channel: 'bbb',
+					total_messages: 12,
+					channel_summaries: [],
+					per_channel: []
+				}
+			]
+		};
+		mockCreateJob.mockResolvedValueOnce({
+			job_id: 'abc123',
+			script: 'chat_stats',
+			status: 'running',
+			progress: 0,
+			message: '',
+			result: null,
+			error: null
+		});
+		mockWaitJob.mockResolvedValueOnce({ ...doneJob(), result: pooled });
+
+		render(ChatStatsPanel);
+		await fillDates();
+		await fireEvent.click(screen.getByRole('button', { name: /run stats/i }));
+
+		await waitFor(() => {
+			expect(screen.getByTitle('Active in: aaa, bbb')).toHaveTextContent('aaa·bbb');
+		});
+		expect(screen.getByTitle('Active in: aaa')).toHaveTextContent('aaa');
+		// Sticky tab bar stays pinned above the section nav.
+		const tabBar = screen.getByRole('button', { name: 'Pooled (All Channels)' }).parentElement;
+		expect(tabBar?.className).toContain('sticky');
+		expect(screen.getByRole('navigation', { name: 'Result sections' }).className).toContain(
+			'top-11'
+		);
 	});
 });

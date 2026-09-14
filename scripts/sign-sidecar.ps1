@@ -2,6 +2,15 @@
 # Requires: Azure Trusted Signing or an OV/EV code-signing cert.
 # Usage: powershell -File scripts/sign-sidecar.ps1
 # See plan.md installer §3: Tauri signs its own exe, you must sign api-server-*.exe yourself.
+#
+# SIGN_COMMAND contract (read this):
+#   Must be a COMMAND LINE, not just a binary path. It is tokenized on
+#   whitespace and the exe is appended as the final argument. For signtool:
+#     SIGN_COMMAND = 'signtool.exe sign /fd sha256 /tr http://timestamp.digicert.com /td sha256'
+#   For Azure Trusted Signing:
+#     SIGN_COMMAND = 'AzureSignTool.exe sign -kvu https://... -kvc ... -tr ...'
+#   If your invocation needs quoting that survives whitespace tokenization,
+#   point SIGN_COMMAND at a wrapper script that takes the exe as $args[0].
 param(
   [string]$Triple = (rustc --print host-tuple).Trim()
 )
@@ -15,4 +24,15 @@ if (-not $env:SIGN_COMMAND) {
   Write-Warning "SIGN_COMMAND not set — skipping sidecar signing (unsigned builds trigger SmartScreen)."
   exit 0
 }
-& $env:SIGN_COMMAND $exe
+# Tokenize: `& "a b c" arg` treats the whole string as a command name and fails.
+# Split on whitespace, then re-invoke with the exe appended.
+$parts = $env:SIGN_COMMAND -split '\s+' | Where-Object { $_ -ne '' }
+if ($parts.Count -eq 0) {
+  Write-Error "SIGN_COMMAND is empty after tokenization."
+  exit 1
+}
+& $parts[0] @($parts[1..($parts.Count - 1)]) $exe
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "SIGN_COMMAND exited with code $LASTEXITCODE — sidecar is NOT signed."
+  exit $LASTEXITCODE
+}

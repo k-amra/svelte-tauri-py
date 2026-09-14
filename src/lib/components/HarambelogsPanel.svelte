@@ -60,6 +60,128 @@
 	let month = $state('');
 	let day = $state('');
 
+	// --- Client-side filters (apply to the fetched `messages` array) -------
+	/** Free-text substring (case-insensitive) matched against message text. */
+	let filterText = $state('');
+	let filterContainsUrl = $state(false);
+	let filterContainsMention = $state(false);
+	let filterContainsCommand = $state(false);
+	let filterContainsEmote = $state(false);
+	let filterContainsNumber = $state(false);
+	let filterOnlyReplies = $state(false);
+	let filterOnlyFirstMsg = $state(false);
+	let filterOnlyReturning = $state(false);
+	let filterMinLength = $state<number | null>(null);
+	let filterMaxLength = $state<number | null>(null);
+	let filterUsername = $state('');
+	let filtersOpen = $state(false);
+
+	function clearFilters() {
+		filterText = '';
+		filterContainsUrl = false;
+		filterContainsMention = false;
+		filterContainsCommand = false;
+		filterContainsEmote = false;
+		filterContainsNumber = false;
+		filterOnlyReplies = false;
+		filterOnlyFirstMsg = false;
+		filterOnlyReturning = false;
+		filterMinLength = null;
+		filterMaxLength = null;
+		filterUsername = '';
+	}
+
+	const activeFilterCount = $derived(
+		[
+			filterText.trim().length > 0,
+			filterContainsUrl,
+			filterContainsMention,
+			filterContainsCommand,
+			filterContainsEmote,
+			filterContainsNumber,
+			filterOnlyReplies,
+			filterOnlyFirstMsg,
+			filterOnlyReturning,
+			filterMinLength != null,
+			filterMaxLength != null,
+			filterUsername.trim().length > 0
+		].filter(Boolean).length
+	);
+
+	// --- Regexes reused across the panel -----------------------------------
+	// `\[` keeps the `[` literal unambiguous inside the class.
+	// eslint-disable-next-line no-useless-escape
+	const URL_RE = /https?:\/\/[^\s<>()\[\]{}"',;!?]+/;
+	const MENTION_RE = /\B@[A-Za-z0-9_]+/;
+	const COMMAND_RE = /^\s*![A-Za-z0-9_-]+/;
+
+	/** Extract a message's tags as a typed-ish object for safe lookups. */
+	function tagOf(msg: FullMessage, key: string): string | undefined {
+		const v = msg.tags?.[key];
+		return typeof v === 'string' ? v : undefined;
+	}
+
+	function hasUrl(msg: FullMessage): boolean {
+		return URL_RE.test(msg.text);
+	}
+	function hasMention(msg: FullMessage): boolean {
+		return MENTION_RE.test(msg.text);
+	}
+	function hasCommand(msg: FullMessage): boolean {
+		return COMMAND_RE.test(msg.text);
+	}
+	function hasEmote(msg: FullMessage): boolean {
+		const emotes = tagOf(msg, 'emotes');
+		return !!emotes && emotes.length > 0;
+	}
+	function hasNumber(msg: FullMessage): boolean {
+		return /\d/.test(msg.text);
+	}
+	function isReply(msg: FullMessage): boolean {
+		return !!tagOf(msg, 'reply-parent-msg-id');
+	}
+	function isFirstMsg(msg: FullMessage): boolean {
+		return tagOf(msg, 'first-msg') === '1';
+	}
+	function isReturningChatter(msg: FullMessage): boolean {
+		return tagOf(msg, 'returning-chatter') === '1';
+	}
+
+	const filteredMessages = $derived.by(() => {
+		const text = filterText.trim().toLowerCase();
+		const uname = filterUsername.trim().toLowerCase();
+		return messages.filter((m) => {
+			if (text && !m.text.toLowerCase().includes(text)) return false;
+			if (uname && !m.username.toLowerCase().includes(uname)) return false;
+			if (filterContainsUrl && !hasUrl(m)) return false;
+			if (filterContainsMention && !hasMention(m)) return false;
+			if (filterContainsCommand && !hasCommand(m)) return false;
+			if (filterContainsEmote && !hasEmote(m)) return false;
+			if (filterContainsNumber && !hasNumber(m)) return false;
+			if (filterOnlyReplies && !isReply(m)) return false;
+			if (filterOnlyFirstMsg && !isFirstMsg(m)) return false;
+			if (filterOnlyReturning && !isReturningChatter(m)) return false;
+			const len = m.text.length;
+			if (filterMinLength != null && len < filterMinLength) return false;
+			if (filterMaxLength != null && len > filterMaxLength) return false;
+			return true;
+		});
+	});
+
+	// --- Per-message tag chips shown on each card -------------------------
+	function messageTags(msg: FullMessage): { label: string; class: string }[] {
+		const out: { label: string; class: string }[] = [];
+		if (hasUrl(msg)) out.push({ label: 'URL', class: 'bg-sky-500/15 text-sky-600' });
+		if (hasMention(msg)) out.push({ label: '@', class: 'bg-emerald-500/15 text-emerald-600' });
+		if (hasCommand(msg)) out.push({ label: '!cmd', class: 'bg-amber-500/15 text-amber-600' });
+		if (hasEmote(msg)) out.push({ label: 'emote', class: 'bg-purple-500/15 text-purple-600' });
+		if (isReply(msg)) out.push({ label: 'reply', class: 'bg-teal-500/15 text-teal-600' });
+		if (isFirstMsg(msg)) out.push({ label: 'first', class: 'bg-rose-500/15 text-rose-600' });
+		if (isReturningChatter(msg))
+			out.push({ label: 'returning', class: 'bg-indigo-500/15 text-indigo-600' });
+		return out;
+	}
+
 	const operations: { value: Operation; label: string }[] = [
 		{ value: 'channels', label: 'Get Channels' },
 		{ value: 'capabilities', label: 'Get Capabilities' },
@@ -111,8 +233,19 @@
 	);
 	const needsUserId = $derived(operation === 'namehistory');
 	const needsDateParts = $derived(['logs/channel/date', 'logs/user/month'].includes(operation));
-	// `list` accepts an empty channel (full list), so the field is shown but optional.
 	const needsChannelValue = $derived(needsChannel && operation !== 'list');
+
+	/** Operations whose results land in `messages` and can be filtered. */
+	const messagesOperations = new Set<Operation>([
+		'search',
+		'logs/channel',
+		'logs/user',
+		'logs/channel/date',
+		'logs/user/month',
+		'random/channel',
+		'random/user'
+	]);
+	const showFilters = $derived(messagesOperations.has(operation));
 
 	function clearResults() {
 		error = '';
@@ -122,6 +255,9 @@
 		statsChannel = null;
 		nameHistory = [];
 		rawResult = [];
+		// Clearing results also resets filters, since they only make sense
+		// for the current message set.
+		clearFilters();
 	}
 
 	/**
@@ -308,6 +444,33 @@
 			loading = false;
 		}
 	}
+
+	/** Copy the filtered message list as plain text — useful for reports. */
+	async function copyFiltered() {
+		const text = filteredMessages
+			.map((m) => `[${new Date(m.timestamp).toISOString()}] ${m.displayName}: ${m.text}`)
+			.join('\n');
+		try {
+			await navigator.clipboard.writeText(text);
+		} catch {
+			// Clipboard may be unavailable; silently ignore.
+		}
+	}
+
+	/** Export filtered messages as JSON. */
+	function downloadFilteredJson() {
+		const blob = new Blob([JSON.stringify(filteredMessages, null, 2)], {
+			type: 'application/json'
+		});
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = `harambelogs_${operation}_${Date.now()}.json`;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		URL.revokeObjectURL(url);
+	}
 </script>
 
 <Card class="w-120 shadow-xl backdrop-blur-sm">
@@ -471,22 +634,223 @@
 			<p class="text-destructive text-center text-sm">{error}</p>
 		{/if}
 
+		<!-- ─── Filter panel (only for message-returning operations) ─────── -->
+		{#if showFilters && messages.length > 0}
+			<details class="border-border/60 group rounded-md border" bind:open={filtersOpen}>
+				<summary
+					class="hover:bg-muted/50 flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm font-medium"
+				>
+					<span class="flex items-center gap-2">
+						Filters
+						{#if activeFilterCount > 0}
+							<span
+								class="bg-primary text-primary-foreground rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+							>
+								{activeFilterCount} active
+							</span>
+						{/if}
+					</span>
+					<span class="text-muted-foreground text-xs group-open:hidden">
+						{filteredMessages.length} / {messages.length} shown
+					</span>
+				</summary>
+
+				<div class="space-y-3 border-t p-3">
+					<!-- Free-text search -->
+					<div>
+						<Label for="hl-filter-text" class="text-xs">Contains text</Label>
+						<Input
+							id="hl-filter-text"
+							bind:value={filterText}
+							placeholder="substring match (case-insensitive)"
+							class="mt-1 h-8 text-xs"
+						/>
+					</div>
+
+					<!-- Username filter -->
+					<div>
+						<Label for="hl-filter-user" class="text-xs">From user</Label>
+						<Input
+							id="hl-filter-user"
+							bind:value={filterUsername}
+							placeholder="partial username"
+							class="mt-1 h-8 text-xs"
+						/>
+					</div>
+
+					<!-- Toggle grid -->
+					<div class="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+						<label
+							class="hover:bg-muted border-border/60 flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+						>
+							<input
+								type="checkbox"
+								bind:checked={filterContainsUrl}
+								class="accent-primary size-3.5"
+							/>
+							<span>URLs only</span>
+						</label>
+						<label
+							class="hover:bg-muted border-border/60 flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+						>
+							<input
+								type="checkbox"
+								bind:checked={filterContainsMention}
+								class="accent-primary size-3.5"
+							/>
+							<span>@mentions only</span>
+						</label>
+						<label
+							class="hover:bg-muted border-border/60 flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+						>
+							<input
+								type="checkbox"
+								bind:checked={filterContainsCommand}
+								class="accent-primary size-3.5"
+							/>
+							<span>!commands only</span>
+						</label>
+						<label
+							class="hover:bg-muted border-border/60 flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+						>
+							<input
+								type="checkbox"
+								bind:checked={filterContainsEmote}
+								class="accent-primary size-3.5"
+							/>
+							<span>Emotes only</span>
+						</label>
+						<label
+							class="hover:bg-muted border-border/60 flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+						>
+							<input
+								type="checkbox"
+								bind:checked={filterContainsNumber}
+								class="accent-primary size-3.5"
+							/>
+							<span>Numbers</span>
+						</label>
+						<label
+							class="hover:bg-muted border-border/60 flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+						>
+							<input
+								type="checkbox"
+								bind:checked={filterOnlyReplies}
+								class="accent-primary size-3.5"
+							/>
+							<span>Replies only</span>
+						</label>
+						<label
+							class="hover:bg-muted border-border/60 flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+						>
+							<input
+								type="checkbox"
+								bind:checked={filterOnlyFirstMsg}
+								class="accent-primary size-3.5"
+							/>
+							<span>First-time chatters</span>
+						</label>
+						<label
+							class="hover:bg-muted border-border/60 flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+						>
+							<input
+								type="checkbox"
+								bind:checked={filterOnlyReturning}
+								class="accent-primary size-3.5"
+							/>
+							<span>Returning chatters</span>
+						</label>
+					</div>
+
+					<!-- Length range -->
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<Label for="hl-filter-minlen" class="text-xs">Min length</Label>
+							<Input
+								id="hl-filter-minlen"
+								type="number"
+								min="0"
+								bind:value={filterMinLength}
+								placeholder="0"
+								class="mt-1 h-8 text-xs"
+							/>
+						</div>
+						<div>
+							<Label for="hl-filter-maxlen" class="text-xs">Max length</Label>
+							<Input
+								id="hl-filter-maxlen"
+								type="number"
+								min="0"
+								bind:value={filterMaxLength}
+								placeholder="∞"
+								class="mt-1 h-8 text-xs"
+							/>
+						</div>
+					</div>
+
+					<!-- Actions -->
+					<div class="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+						<Button
+							size="sm"
+							variant="outline"
+							onclick={clearFilters}
+							disabled={activeFilterCount === 0}
+						>
+							Clear filters
+						</Button>
+						<div class="flex gap-2">
+							<Button size="sm" variant="outline" onclick={copyFiltered}>Copy as text</Button>
+							<Button size="sm" variant="outline" onclick={downloadFilteredJson}>
+								Export JSON
+							</Button>
+						</div>
+					</div>
+				</div>
+			</details>
+		{/if}
+
 		<!-- Results: Messages -->
 		{#if messages.length > 0}
-			<div
-				class="bg-muted border-border/50 max-h-48 space-y-2 overflow-auto rounded border p-3 text-xs"
-			>
-				{#each messages as msg (msg.id)}
-					<div class="border-border/30 border-b pb-1 last:border-0">
-						<div class="flex items-baseline justify-between">
-							<span class="text-primary font-bold">{msg.displayName}</span>
-							<span class="text-muted-foreground text-[10px]">
-								{new Date(msg.timestamp).toLocaleString()}
-							</span>
+			<div class="space-y-2">
+				<div class="text-muted-foreground flex items-baseline justify-between text-xs">
+					<span>
+						{#if activeFilterCount > 0}
+							Showing <strong class="text-foreground">{filteredMessages.length}</strong>
+							of {messages.length} messages
+						{:else}
+							{messages.length} messages
+						{/if}
+					</span>
+					{#if activeFilterCount > 0 && filteredMessages.length === 0}
+						<span class="text-amber-500">no messages match the current filters</span>
+					{/if}
+				</div>
+
+				<div
+					class="bg-muted border-border/50 max-h-96 space-y-2 overflow-auto rounded border p-3 text-xs"
+				>
+					{#each filteredMessages as msg (msg.id)}
+						{@const tags = messageTags(msg)}
+						<div class="border-border/30 border-b pb-1.5 last:border-0">
+							<div class="flex items-baseline justify-between gap-2">
+								<span class="text-primary truncate font-bold">{msg.displayName}</span>
+								<span class="text-muted-foreground shrink-0 text-[10px]">
+									{new Date(msg.timestamp).toLocaleString()}
+								</span>
+							</div>
+							<p class="mt-0.5 break-words">{msg.text}</p>
+							{#if tags.length > 0}
+								<div class="mt-1 flex flex-wrap gap-1">
+									{#each tags as t (t.label)}
+										<span class="rounded px-1.5 py-0.5 text-[9px] font-medium {t.class}">
+											{t.label}
+										</span>
+									{/each}
+								</div>
+							{/if}
 						</div>
-						<p class="mt-0.5 break-words">{msg.text}</p>
-					</div>
-				{/each}
+					{/each}
+				</div>
 			</div>
 		{/if}
 

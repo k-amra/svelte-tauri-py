@@ -45,14 +45,35 @@ let cargo = readFileSync(cargoPath, 'utf8');
 cargo = replacePackageVersion(cargo, version, cargoPath);
 writeFileSync(cargoPath, cargo);
 
-// src-python/pyproject.toml
+// src-python/pyproject.toml — scoped to [project], not the first `version =`
+// anywhere in the file (which could match a nested table).
 const pyPath = join(root, 'src-python', 'pyproject.toml');
 try {
 	let py = readFileSync(pyPath, 'utf8');
-	py = py.replace(/(^version = ")[^"]+(")/m, `$1${version}$2`);
-	writeFileSync(pyPath, py);
-} catch {
-	console.warn('[version] src-python/pyproject.toml not found, skipping');
+	const lines = py.split(/\r?\n/);
+	let inProject = false;
+	let replaced = false;
+	for (let i = 0; i < lines.length; i += 1) {
+		const line = lines[i];
+		if (/^\s*\[project\]\s*$/.test(line)) {
+			inProject = true;
+			continue;
+		}
+		if (/^\s*\[[^\]]+\]\s*$/.test(line)) inProject = false;
+		if (inProject && /^\s*version\s*=\s*"/.test(line)) {
+			lines[i] = line.replace(/(version\s*=\s*")[^"]*(".*)$/, `$1${version}$2`);
+			replaced = true;
+			break;
+		}
+	}
+	if (!replaced) throw new Error(`[project] version not found in ${pyPath}`);
+	writeFileSync(pyPath, lines.join('\n'));
+} catch (e) {
+	if (e.code === 'ENOENT') {
+		console.warn('[version] src-python/pyproject.toml not found, skipping');
+	} else {
+		throw e;
+	}
 }
 console.log(
 	'[version] done. Also update bun.lock via `bun install` and Cargo.lock via `cargo check`.'

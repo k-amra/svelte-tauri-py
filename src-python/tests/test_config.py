@@ -22,5 +22,6 @@ def test_token_generated_and_printed_when_missing(monkeypatch, capsys):
     args = parse_args([])
     assert args.token
     err = capsys.readouterr().err
-    assert "generated ephemeral token" in err
-    assert args.token in err
+    # The token VALUE must never reach stderr (diagnostics leak surface).
+    assert "generated an ephemeral token" in err
+    assert args.token not in err

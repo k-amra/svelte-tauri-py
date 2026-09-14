@@ -22,6 +22,8 @@ from .analytics.health import (
     compute_non_ascii,
     compute_roles,
     compute_self_repetition,
+    compute_staff_list,
+    compute_subscriber_list,
 )
 from .analytics.language import detect_language, detect_language_by_day
 from .analytics.length import compute_length_trend
@@ -112,6 +114,10 @@ def compute_stats(df: pl.DataFrame, params: Params, emote_map: dict[str, str]) -
     stats.update(compute_activity_per_day(df))
     stats.update(compute_time(df))
     stats.update(compute_roles(df))
+    if params.include_staff_list:
+        stats.update(compute_staff_list(df))
+    if params.include_subscriber_list:
+        stats.update(compute_subscriber_list(df, top_n=params.top_n * 10))
     stats.update(compute_first_message_hours(df))
 
     top_emotes, seen_emotes = count_emotes(df, twitch_emotes, emote_map, params.top_emotes_n)

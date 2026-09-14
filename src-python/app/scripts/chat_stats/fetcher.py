@@ -10,7 +10,6 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -295,6 +294,10 @@ async def _run_month(
     new_frames: list[pl.DataFrame] = []
     new_truncated = False
     new_twitch_id: str | None = None
+    # Track coverage per span as it completes, so a truncated span can only
+    # attest to what it actually attained — not to the global max of every
+    # span combined (which would falsely cover later, completed gaps).
+    new_cov = list(stored_cov)
     for span_from, span_to in spans:
         messages, span_truncated = await _fetch_span_resilient(
             api, params, span_from, span_to, on_page, label, progress, base
@@ -302,30 +305,22 @@ async def _run_month(
         new_truncated = new_truncated or span_truncated
         if new_twitch_id is None:
             new_twitch_id = extract_twitch_id(messages)
-        new_frames.append(messages_to_frame(messages))
+        frame = messages_to_frame(messages)
+        new_frames.append(frame)
+
+        if span_truncated:
+            # Coverage extends only to the actual high-water mark of THIS span.
+            _, hi = _span_extremes(frame)
+            if hi is not None and span_from < hi:
+                new_cov = log_cache.merge_coverage(new_cov, (span_from, hi))
+        else:
+            new_cov = log_cache.merge_coverage(new_cov, (span_from, span_to))
 
     if stored is not None:
         merged = pl.concat([stored[0], *new_frames], how="vertical")
     else:
         merged = pl.concat(new_frames, how="vertical") if len(new_frames) > 1 else new_frames[0]
     merged = dedupe_by_id(merged).sort("ts")
-
-    # Build new coverage as a list of intervals.
-    new_cov = list(stored_cov)
-    for span_from, span_to in spans:
-        if not new_truncated:
-            new_cov = log_cache.merge_coverage(new_cov, (span_from, span_to))
-
-    if new_truncated:
-        # Only the *new* frames can attest to how far we actually got.
-        # `merged` also contains old cached rows and would falsely extend
-        # coverage past a truncated span.
-        new_merged = pl.concat(new_frames, how="vertical") if new_frames else merged
-        _, data_hi = _span_extremes(new_merged)
-        if data_hi is not None and spans:
-            span_from = min(s for s, _ in spans)
-            if span_from < data_hi:
-                new_cov = log_cache.merge_coverage(new_cov, (span_from, data_hi))
 
     month_truncated = bool(meta.get("truncated", False)) or new_truncated
     complete = (
@@ -372,18 +367,35 @@ async def _run_month(
 
 
 async def _run_chunked(
-    params: Params, progress: Callable[[float, str], None]
-) -> tuple[pl.DataFrame, bool, bool, str | None, str | None]:
-    """Fetch the range month by month over one shared HTTP client.
+    params: Params,
+    progress: Callable[[float, str], None],
+    api: HarambelogsAPI | None = None,
+    channel: str | None = None,
+    channel_id_type: str | None = None,
+) -> tuple[pl.DataFrame, bool, bool, str | None, str | None, bool]:
+    """Fetch the range month by month.
 
-    Returns ``(frame, any_fetch, truncated, twitch_id, cached_at)``.
-    ``cached_at`` is set only when every month came from cache.
+    If `api` is None and a fetch is needed, owns a client for the duration;
+    otherwise reuses the caller-provided client. See `_run_chunked_with_api`
+    for the body and the cache-hit reasoning.
 
-    Two phases: first decide purely locally (chunk validity) whether any
-    month needs downloading at all — a full hit stays fully offline. Only
-    then, the requested range is clamped once to the channel's logged
-    calendar, so pre-history/future edges never hit the network at all.
+    `channel` / `channel_id_type` override `params.channel` for multi-channel
+    runs (single-channel callers pass nothing and get params.channel). The
+    override is applied by rebinding params so every helper downstream
+    (`_run_month`, cache keys) sees the right channel.
+
+    Returns ``(frame, any_fetch, truncated, twitch_id, cached_at,
+    range_fully_outside)``. ``cached_at`` is set only when every month came
+    from cache; ``range_fully_outside`` is True when the whole requested range
+    sits outside the channel's logged calendar.
     """
+    if channel is not None:
+        params = params.model_copy(
+            update={
+                "channel": channel,
+                "channel_id_type": channel_id_type or params.channel_id_type,
+            }
+        )
     req_from = _as_utc(params.from_date)
     req_to = _as_utc(params.to_date)
     months = _get_months_range(req_from, req_to)
@@ -409,45 +421,78 @@ async def _run_chunked(
                 needs_fetch = True
                 break
 
-    # Open the API client only if we actually need to fetch.
-    async with HarambelogsAPI() if needs_fetch else nullcontext() as api:
-        if needs_fetch:
-            days = await channel_log_days(api, params.channel_id_type, params.channel)
-            if days:
-                first_day = min(days)
-                last_day = max(days)
-                first = datetime(first_day.year, first_day.month, first_day.day, tzinfo=UTC)
-                last_end = datetime(last_day.year, last_day.month, last_day.day, tzinfo=UTC) + timedelta(days=1)
-                clamped_from = max(req_from, first)
-                clamped_to = min(req_to, last_end)
-                if clamped_from != req_from or clamped_to != req_to:
-                    progress(
-                        2.0,
-                        f"range clamped to logged history ({clamped_from.date()}..{clamped_to.date()})",
-                    )
-                req_from, req_to = clamped_from, clamped_to
-                months = _get_months_range(req_from, req_to) if req_from < req_to else []
+    if api is not None or not needs_fetch:
+        # Caller gave us a client, or we don't need one. (When needs_fetch is
+        # False, `_run_month` will hit cache for every month, so api=None is
+        # safe — its guard only fires on an actual cache miss.)
+        return await _run_chunked_with_api(
+            api, params, req_from, req_to, months, progress, needs_fetch
+        )
 
-        total = len(months)
-        parts: list[pl.DataFrame] = []
-        any_fetch = False
-        overall_truncated = False
-        twitch_id: str | None = None
-        newest_cached_at: float | None = None
+    async with HarambelogsAPI() as owned:
+        return await _run_chunked_with_api(
+            owned, params, req_from, req_to, months, progress, needs_fetch
+        )
 
-        for i, (year, month) in enumerate(months):
-            base = 2.0 + 76.0 * (i / total) if total > 0 else 2.0
-            span = 76.0 / total if total > 0 else 76.0
-            result = await _run_month(api, params, year, month, req_from, req_to, base, span, progress)
-            parts.append(result.frame)
-            any_fetch = any_fetch or result.fetched
-            overall_truncated = overall_truncated or result.truncated
-            if result.twitch_id is not None and twitch_id is None:
-                twitch_id = result.twitch_id
-            if result.cached_at is not None and not result.fetched:
-                newest_cached_at = (
-                    result.cached_at if newest_cached_at is None else max(newest_cached_at, result.cached_at)
+
+async def _run_chunked_with_api(
+    api: HarambelogsAPI | None,
+    params: Params,
+    req_from: datetime,
+    req_to: datetime,
+    months: list[tuple[int, int]],
+    progress: Callable[[float, str], None],
+    needs_fetch: bool,
+) -> tuple[pl.DataFrame, bool, bool, str | None, str | None, bool]:
+    """Body of `_run_chunked` once client ownership is resolved.
+
+    Two phases: first decide purely locally (chunk validity) whether any
+    month needs downloading at all — a full hit stays fully offline. Only
+    then, the requested range is clamped once to the channel's logged
+    calendar, so pre-history/future edges never hit the network at all.
+    """
+    range_fully_outside = False
+    if needs_fetch and api is not None:
+        days = await channel_log_days(api, params.channel_id_type, params.channel)
+        if days:
+            first_day = min(days)
+            last_day = max(days)
+            first = datetime(first_day.year, first_day.month, first_day.day, tzinfo=UTC)
+            last_end = datetime(last_day.year, last_day.month, last_day.day, tzinfo=UTC) + timedelta(days=1)
+            clamped_from = max(req_from, first)
+            clamped_to = min(req_to, last_end)
+            if clamped_from >= clamped_to:
+                # Entirely outside the logged calendar — surface this instead
+                # of silently returning a clean zero-stat result.
+                range_fully_outside = True
+            elif clamped_from != req_from or clamped_to != req_to:
+                progress(
+                    2.0,
+                    f"range clamped to logged history ({clamped_from.date()}..{clamped_to.date()})",
                 )
+            req_from, req_to = clamped_from, clamped_to
+            months = _get_months_range(req_from, req_to) if req_from < req_to else []
+
+    total = len(months)
+    parts: list[pl.DataFrame] = []
+    any_fetch = False
+    overall_truncated = False
+    twitch_id: str | None = None
+    newest_cached_at: float | None = None
+
+    for i, (year, month) in enumerate(months):
+        base = 2.0 + 76.0 * (i / total) if total > 0 else 2.0
+        span = 76.0 / total if total > 0 else 76.0
+        result = await _run_month(api, params, year, month, req_from, req_to, base, span, progress)
+        parts.append(result.frame)
+        any_fetch = any_fetch or result.fetched
+        overall_truncated = overall_truncated or result.truncated
+        if result.twitch_id is not None and twitch_id is None:
+            twitch_id = result.twitch_id
+        if result.cached_at is not None and not result.fetched:
+            newest_cached_at = (
+                result.cached_at if newest_cached_at is None else max(newest_cached_at, result.cached_at)
+            )
 
     df = pl.concat(parts, how="vertical") if parts else messages_to_frame([])
     # Final dedupe: month parts can share an id at their boundaries, and
@@ -460,13 +505,87 @@ async def _run_chunked(
         if (not any_fetch and newest_cached_at is not None)
         else None
     )
-    return df, any_fetch, overall_truncated, twitch_id, cached_at
+    return df, any_fetch, overall_truncated, twitch_id, cached_at, range_fully_outside
 
 
 async def run_all(
-    params: Params, progress: Callable[[float, str], None]
-) -> tuple[pl.DataFrame, bool, bool, str | None, str | None, dict[str, str]]:
-    df, any_fetch, truncated, twitch_id, cached_at = await _run_chunked(params, progress)
-    progress(80.0, "fetching emotes")
-    emote_map = await _safe_fetch_emotes(params.channel, twitch_id)
-    return df, any_fetch, truncated, twitch_id, cached_at, emote_map
+    params: Params,
+    progress: Callable[[float, str], None],
+    api: HarambelogsAPI | None = None,
+) -> tuple[pl.DataFrame, bool, bool, str | None, str | None, list[dict[str, str]], dict[str, str], list[str]]:
+    """Fetch all channels; returns per-channel emote maps plus their union.
+
+    Returns ``(frame, any_fetch, truncated, twitch_id, cached_at,
+    emote_maps, union_emotes, outside_channels)``. ``emote_maps[i]``
+    aligns with ``params.channels[i]`` so callers can compute accurate
+    per-channel stats; ``union_emotes`` is what the pooled run uses.
+    ``outside_channels`` lists channels whose requested range sits entirely
+    outside their logged history (empty when none)."""
+    # Single-channel fast path — identical to the pre-multi-channel behavior.
+    if len(params.channels) <= 1:
+        ch = params.channels[0] if params.channels else (params.channel or "")
+        df, any_fetch, truncated, twitch_id, cached_at, fully_outside = await _run_chunked(
+            params, progress, api=api
+        )
+        progress(80.0, "fetching emotes")
+        emote_map = await _safe_fetch_emotes(ch, twitch_id)
+        return df, any_fetch, truncated, twitch_id, cached_at, [emote_map], emote_map, (
+            [ch] if fully_outside else []
+        )
+
+    # Multi-channel path: fetch each channel sequentially (the fetcher already
+    # runs 5 concurrent page requests per channel; gathering channels on top
+    # would multiply upstream pressure and risk rate limiting), tag every row
+    # with its channel, and pool the frames.
+    frames: list[pl.DataFrame] = []
+    emote_maps: list[dict[str, str]] = []
+    any_fetch_all = False
+    truncated_all = False
+    newest_cached_at: float | None = None
+    outside_channels: list[str] = []
+    n = len(params.channels)
+
+    for i, ch in enumerate(params.channels):
+        # Each channel gets [i/n, (i+1)/n] of the fetch budget (2%..78%).
+        def sub_progress(pct: float, msg: str, _i=i, _ch=ch) -> None:
+            progress(2.0 + 76.0 * ((_i + pct / 100.0) / n), f"[{_ch}] {msg}")
+
+        df, any_fetch, truncated, twitch_id, cached_at, fully_outside = await _run_chunked(
+            params, sub_progress, api=api, channel=ch, channel_id_type=params.channel_id_type
+        )
+        # Tag every row with the channel name (messages_to_frame doesn't add one).
+        df = df.with_columns(pl.lit(ch).alias("channel"))
+        frames.append(df)
+        any_fetch_all = any_fetch_all or any_fetch
+        truncated_all = truncated_all or truncated
+        if fully_outside:
+            outside_channels.append(ch)
+        if cached_at is not None and not any_fetch:
+            newest_cached_at = (
+                _as_utc(datetime.fromisoformat(cached_at)).timestamp()
+                if newest_cached_at is None
+                else max(newest_cached_at, _as_utc(datetime.fromisoformat(cached_at)).timestamp())
+            )
+
+        progress(78.0 + (i + 1) / n * 2.0, f"[{ch}] fetching emotes")
+        emote_maps.append(await _safe_fetch_emotes(ch, twitch_id))
+
+    merged = pl.concat(frames, how="vertical").sort("ts")
+    # Message ids are globally unique per Twitch message, so cross-channel
+    # collisions shouldn't happen; dedupe anyway to preserve the one-row-per-
+    # message invariant.
+    merged = dedupe_by_id(merged)
+
+    # Union of emote maps. On name collision the later channel wins; emote
+    # names are unique per channel but not across the union, and either
+    # mapping is fine for name-based text matching.
+    union_emotes: dict[str, str] = {}
+    for em in emote_maps:
+        union_emotes.update(em)
+
+    cached_at = (
+        _as_utc(datetime.fromtimestamp(newest_cached_at, UTC)).isoformat()
+        if (not any_fetch_all and newest_cached_at is not None)
+        else None
+    )
+    return merged, any_fetch_all, truncated_all, None, cached_at, emote_maps, union_emotes, outside_channels

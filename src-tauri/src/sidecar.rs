@@ -200,10 +200,7 @@ pub struct BackendDiagnostics {
 /// blocking HTTP probes (health + authenticated /api/scripts) — only call
 /// it from the Diagnostics panel, never from the startup path.
 #[tauri::command]
-pub fn get_backend(
-    state: tauri::State<'_, BackendState>,
-    diagnostic: Option<bool>,
-) -> BackendInfo {
+pub fn get_backend(state: tauri::State<'_, BackendState>, diagnostic: Option<bool>) -> BackendInfo {
     let diagnostic = diagnostic.unwrap_or(false);
     let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
     let Some(b) = guard.as_ref() else {
@@ -220,8 +217,7 @@ pub fn get_backend(
 
     let diagnostics = if diagnostic {
         Some(BackendDiagnostics {
-            rust_health: http_get(port, None, "/health")
-                .unwrap_or_else(|e| format!("ERROR {e}")),
+            rust_health: http_get(port, None, "/health").unwrap_or_else(|e| format!("ERROR {e}")),
             rust_scripts: http_get(port, Some(&token), "/api/scripts")
                 .unwrap_or_else(|e| format!("ERROR {e}")),
         })
@@ -310,7 +306,18 @@ fn spawn_dev(app: &AppHandle, token: &str, data_dir: &str) {
                 on_ready(&handle, port, token.clone());
             }
         }
-        log::info!("sidecar-dev stdout closed (process likely exited)");
+        // stdout closed → process is gone (or about to be). Mirror the
+        // bundled path: clear state and notify the frontend so the UI
+        // stops claiming "Backend ready" against a dead server. Clearing
+        // DevChild also stops shutdown() from killing an exited PID.
+        log::warn!("sidecar-dev stdout closed (process exited)");
+        if let Some(state) = handle.try_state::<BackendState>() {
+            *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        if let Some(state) = handle.try_state::<DevChild>() {
+            *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        let _ = handle.emit("backend-gone", ());
     });
 }
 

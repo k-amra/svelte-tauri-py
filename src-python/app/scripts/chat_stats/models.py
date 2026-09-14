@@ -9,10 +9,22 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+ComparisonMode = Literal[
+    "previous_period",
+    "previous_week",
+    "previous_month",
+    "previous_year",
+    "custom",
+]
+
 
 class Params(BaseModel):
-    channel: str
+    # Deprecated: use `channels`. Kept for backwards compat; the validator
+    # coerces it into `channels` and keeps it in sync for single-channel runs.
+    channel: str | None = None
     channel_id_type: Literal["channel", "channelid"] = "channel"
+    # New: one or more channels (multi-channel runs pool their messages).
+    channels: list[str] = Field(default_factory=list)
 
     # Optional single-user filter. When set, the assembled frame is filtered
     # to this user before any analytics run. None = whole-channel behavior.
@@ -57,6 +69,12 @@ class Params(BaseModel):
     include_cohort_retention: bool = False
     include_language_by_day: bool = False
     include_quote_replies: bool = False
+    include_staff_list: bool = False
+    include_subscriber_list: bool = False
+    compare_previous: bool = False
+    comparison_mode: ComparisonMode = "previous_period"
+    compare_from_date: datetime | None = None
+    compare_to_date: datetime | None = None
 
     session_gap_minutes: int = Field(15, ge=2, le=120)
     anomaly_sigma: float = Field(3.0, ge=1.0, le=6.0)
@@ -68,6 +86,33 @@ class Params(BaseModel):
     # payload. 366 * 3 ≈ 1100 entries worst case. Raise explicitly if the
     # payload size is acceptable.
     max_range_days: int = Field(366, ge=1, le=3660)
+
+    @model_validator(mode="after")
+    def _validate_channels(self) -> Params:
+        # Coerce `channel` -> `channels` for backwards compat.
+        if not self.channels and self.channel:
+            self.channels = [self.channel]
+        if not self.channels:
+            raise ValueError("at least one channel is required")
+        # Dedupe case-insensitively (Twitch logins are case-insensitive),
+        # strip whitespace, keep the first-seen casing.
+        seen: dict[str, str] = {}
+        for raw in self.channels:
+            name = raw.strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key not in seen:
+                seen[key] = name
+        deduped = list(seen.values())
+        if not deduped:
+            raise ValueError("at least one non-empty channel is required")
+        if len(deduped) > 3:
+            raise ValueError(f"at most 3 channels are supported; got {len(deduped)}")
+        self.channels = deduped
+        # Keep `channel` in sync for legacy readers (emote cache keys, etc.).
+        self.channel = deduped[0] if len(deduped) == 1 else None
+        return self
 
     @model_validator(mode="after")
     def _validate_date_order(self) -> Params:
@@ -87,6 +132,18 @@ class Params(BaseModel):
             raise ValueError("user must be non-empty when provided")
         return self
 
+    @model_validator(mode="after")
+    def _validate_comparison(self) -> Params:
+        if self.comparison_mode != "custom":
+            return self
+        if self.compare_from_date is None or self.compare_to_date is None:
+            raise ValueError(
+                "comparison_mode='custom' requires both compare_from_date and compare_to_date"
+            )
+        if self.compare_from_date >= self.compare_to_date:
+            raise ValueError("compare_from_date must be before compare_to_date")
+        return self
+
 
 class TopChatterStat(BaseModel):
     user_id: str
@@ -96,6 +153,9 @@ class TopChatterStat(BaseModel):
     firstSeen: str | None = None
     lastSeen: str | None = None
     engagement_score: float | None = None
+    # Channels this user appeared in. Only populated for pooled multi-channel
+    # runs; single-channel runs leave it empty.
+    channels: list[str] = []
 
 
 class DayCount(BaseModel):
@@ -206,6 +266,15 @@ class RoleCount(BaseModel):
     unique_users: int
 
 
+class StaffMember(BaseModel):
+    user_id: str
+    username: str
+    role: str
+    messageCount: int
+    firstSeen: str | None = None
+    lastSeen: str | None = None
+
+
 class SessionStats(BaseModel):
     total_sessions: int = 0
     avg_messages_per_session: float | None = None
@@ -293,6 +362,92 @@ class CopyPasteChain(BaseModel):
     distinct_users: int
 
 
+class ChannelSummary(BaseModel):
+    """Compact per-channel view within a multi-channel run.
+
+    Full per-channel stats would 3x the payload for redundant info. This
+    carries the headline numbers plus the small lists a summary card needs.
+    `messages_per_day` is aligned to the merged window's span so it can be
+    plotted against the merged chart without offsetting.
+    """
+
+    channel: str
+    total_messages: int
+    unique_chatters: int
+    top_chatters: list[TopChatterStat] = []
+    top_emotes: list[EmoteCount] = []
+    # Side-by-side compare lists — populated only for multi-channel runs.
+    top_words: list[WordCount] = []
+    top_commands: list[CommandCount] = []
+    top_domains: list[DomainCount] = []
+    top_mentions: list[MentionCount] = []
+    roles: list[RoleCount] = []
+    peak_concurrent_chatters: int | None = None
+    messages_per_day: list[DayCount] = []
+    first_message: str | None = None
+    last_message: str | None = None
+
+
+class ChatterDelta(BaseModel):
+    """One chatter's movement between two comparable windows."""
+
+    user_id: str
+    username: str
+    current: int
+    previous: int
+    delta: int
+
+
+class PreviousPeriod(BaseModel):
+    """Summary of the equivalent window immediately before the request.
+
+    Scalar aggregates + small composition maps, so the payload cost stays
+    bounded. Per-user deltas are precomputed server-side (top 5 gainers and
+    losers) — the frontend has no way to reconstruct them from a lean summary.
+
+    vocab_richness / unique_word_count stay None unless compute_overview
+    grows them: the vocabulary stats need the emote-aware stopwords set and
+    are not cheap to recompute here.
+    """
+
+    from_date: str
+    to_date: str
+
+    # Headline scalars (Phase 1)
+    total_messages: int
+    unique_chatters: int
+    avg_message_length: float
+    median_message_length: float | None = None
+    max_message_length: int | None = None
+    avg_words_per_message: float | None = None
+    vocab_richness: float | None = None
+    unique_word_count: int = 0
+    peak_concurrent_chatters: int | None = None
+
+    # Composition (Phase 2)
+    roles: dict[str, int] = {}
+    message_classes: dict[str, int] = {}
+    platform_links: dict[str, int] = {}
+    self_repetition_count: int = 0
+    duplicate_message_count: int = 0
+    non_ascii_ratio: float | None = None
+    cross_user_copy_paste_count: int = 0
+
+    # Top movers (Phase 2)
+    top_chatter_gainers: list[ChatterDelta] = []
+    top_chatter_losers: list[ChatterDelta] = []
+
+    # Time-series (Phase 3) — aligned by *index* to the current window, not by
+    # date. Day 0 of the previous window is the same offset as day 0 of the
+    # current window, which is what makes the visual comparison meaningful.
+    messages_per_day: list[DayCount] = []
+    activity_by_hour: list[int] = Field(default_factory=lambda: [0] * 24)
+
+    # Which window the backend resolved. Lets the UI show "vs previous week"
+    # instead of a generic "vs previous period".
+    mode: ComparisonMode = "previous_period"
+
+
 class Result(BaseModel):
     total_messages: int
     unique_chatters: int
@@ -331,6 +486,9 @@ class Result(BaseModel):
     top_repeated_messages: list[RepeatedMessage] = []
 
     roles: list[RoleCount] = []
+    staff_list: list[StaffMember] = []
+    subscriber_list: list[StaffMember] = []
+    subscriber_count: int = 0
     sessions: SessionStats = Field(default_factory=SessionStats)
     concentration: Concentration = Field(default_factory=Concentration)
     message_classes: MessageClassStats = Field(default_factory=MessageClassStats)
@@ -381,4 +539,22 @@ class Result(BaseModel):
     weekly_seasonality: list[float] | None = None
     quote_reply_count: int = 0
     quote_reply_pairs: list[QuoteReplyPair] = []
+    previous_period: PreviousPeriod | None = None
+    channel_summaries: list[ChannelSummary] = []
+    per_channel: list[ChannelResult] = []
     warnings: list[str] = []
+
+
+class ChannelResult(Result):
+    """Full isolated stats for one channel within a multi-channel run.
+
+    Same shape as `Result` plus the channel name. `channel_summaries` and
+    `per_channel` stay empty here so the frontend can treat it as a
+    single-channel result; `previous_period` stays None to bound payload.
+    """
+
+    channel: str
+
+
+# Resolve the forward reference in Result.per_channel.
+Result.model_rebuild()

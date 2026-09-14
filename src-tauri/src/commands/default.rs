@@ -22,6 +22,10 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, Error> {
 }
 
 fn safe_path(base: &Path, path: &str) -> Result<PathBuf, Error> {
+    // The allowlist is exact-match, so `canonicalize` + `starts_with` below
+    // can never fire today. It's kept as defence-in-depth for the day someone
+    // relaxes the allowlist to a glob or user-provided filename — at that
+    // point the containment check becomes load-bearing, not decorative.
     match path {
         "greet.txt" | "name.txt" => {
             let base = fs::canonicalize(base)?;

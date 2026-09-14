@@ -24,9 +24,11 @@ def parse_args(argv: list[str] | None = None):
     if provided is None:
         args.token = secrets.token_urlsafe(32)
         # stderr (not stdout): Rust parses the READY line from stdout.
+        # Log that a token was generated, never its value — stderr ends up in
+        # log::debug! output and user-captured diagnostics.
         print(
-            f"[api-server] neither --token nor SIDECAR_TOKEN is set; "
-            f"generated ephemeral token: {args.token}",
+            "[api-server] neither --token nor SIDECAR_TOKEN is set; "
+            "generated an ephemeral token (not logged).",
             file=sys.stderr,
         )
     else:

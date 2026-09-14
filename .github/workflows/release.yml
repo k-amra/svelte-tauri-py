@@ -13,7 +13,10 @@ on:
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-  cancel-in-progress: true
+  # Draft release + asset-upload is not atomic; cancelling mid-matrix leaves a
+  # partial draft. Let the previous run finish — the idempotency gate
+  # (`Reject an already-published release`) makes a re-run safe.
+  cancel-in-progress: false
 
 jobs:
   validate-release:
@@ -227,7 +230,9 @@ jobs:
           releaseDraft: true
           prerelease: false
           retryAttempts: 3
-          args: ${{ matrix.args }}
+          # Production CSP: no http://localhost:1420. Dev-only origins stay in
+          # tauri.conf.json for `tauri dev` and are stripped from release builds.
+          args: ${{ matrix.args }} --config src-tauri/tauri.prod.conf.json
 
   publish-release:
     needs:

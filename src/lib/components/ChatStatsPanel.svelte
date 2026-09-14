@@ -1,14 +1,96 @@
 <script lang="ts">
 	import { api } from '$lib/api/client';
 	import { backend } from '$lib/api/backend.svelte';
-	import type { ChatStatsResult } from '$lib/api/chatStats';
-	import { WEEKDAY_LABELS } from '$lib/api/chatStats';
+	import type { ChatStatsResult, ComparisonMode } from '$lib/api/chatStats';
 	import { Button } from '$lib/components/ui/button/index';
 	import { Input } from '$lib/components/ui/input/index';
 	import { Label } from '$lib/components/ui/label/index';
 	import { Card, Header, Title, Content } from '$lib/components/ui/card/index';
+	import ResultSection from '$lib/components/ResultSection.svelte';
+	import ToggleChip from '$lib/components/ToggleChip.svelte';
+	import ResultNav, { type ResultNavSection } from '$lib/components/ResultNav.svelte';
+	import OverviewResults from '$lib/components/results/OverviewResults.svelte';
+	import ActivityResults from '$lib/components/results/ActivityResults.svelte';
+	import WordsEmotesResults from '$lib/components/results/WordsEmotesResults.svelte';
+	import LinksCommandsResults from '$lib/components/results/LinksCommandsResults.svelte';
+	import UserBehaviorResults from '$lib/components/results/UserBehaviorResults.svelte';
+	import AdvancedResults from '$lib/components/results/AdvancedResults.svelte';
+	import {
+		exportStatsJson,
+		exportTopChattersCsv,
+		exportAllSectionsCsv,
+		copySummaryToClipboard
+	} from '$lib/api/export';
+	import { ChevronDown } from '@lucide/svelte';
 
-	let channel = $state('demonzz1');
+	let channels = $state<string[]>(['demonzz1']);
+
+	/** 'all' = pooled multi-channel run; a channel name = stats scoped to it. */
+	type ChannelScope = 'all' | string;
+	let channelScope = $state<ChannelScope>('all');
+
+	const nonEmptyChannels = $derived(channels.map((c) => c.trim()).filter(Boolean));
+	const effectiveChannels = $derived(
+		channelScope === 'all' ? nonEmptyChannels : nonEmptyChannels.filter((c) => c === channelScope)
+	);
+	/** Label for export filenames / summary headers — follows the active scope. */
+	const channelLabel = $derived(effectiveChannels.join('+'));
+
+	// If the currently-scoped channel is removed from the list, snap back to 'all'.
+	$effect(() => {
+		if (channelScope !== 'all' && !nonEmptyChannels.includes(channelScope)) {
+			channelScope = 'all';
+		}
+	});
+
+	function addChannel() {
+		if (channels.length >= 3) return;
+		channels = [...channels, ''];
+	}
+	function removeChannel(i: number) {
+		channels = channels.filter((_, idx) => idx !== i);
+		activeChannelDropdown = -1;
+	}
+
+	// --- Channel autocomplete (GET /api/harambelogs/channels) ---------------
+	let availableChannels = $state<string[]>([]);
+	let channelsLoaded = $state(false);
+	let channelsLoading = $state(false);
+	let activeChannelDropdown = $state(-1);
+
+	async function loadChannels() {
+		if (channelsLoaded || channelsLoading) return;
+		channelsLoading = true;
+		try {
+			availableChannels = await api.harambelogs.getChannels();
+			channelsLoaded = true;
+		} catch (e) {
+			// Non-fatal — the user can still type a channel name by hand.
+			console.warn('[chat-stats] channel list fetch failed:', e);
+		} finally {
+			channelsLoading = false;
+		}
+	}
+
+	function channelSuggestions(query: string, currentIndex: number): string[] {
+		const q = query.trim().toLowerCase();
+		// Don't suggest a channel already chosen in another slot; the current
+		// slot is excluded so "change this one" still shows its own value.
+		const taken = new Set(
+			channels
+				.filter((_, idx) => idx !== currentIndex)
+				.map((c) => c.trim().toLowerCase())
+				.filter(Boolean)
+		);
+		const pool = availableChannels.filter((c) => !taken.has(c.toLowerCase()));
+		const matches = q ? pool.filter((c) => c.toLowerCase().includes(q)) : pool;
+		return matches.slice(0, 20);
+	}
+
+	function pickChannel(i: number, name: string) {
+		channels[i] = name;
+		activeChannelDropdown = -1;
+	}
 	let channelType = $state<'channel' | 'channelid'>('channel');
 	let userFilter = $state('');
 	let userFilterType = $state<'user' | 'userid'>('user');
@@ -36,6 +118,8 @@
 	let includeAnomalies = $state(true);
 	let includeLanguage = $state(false);
 	let includeCopyPaste = $state(true);
+	let includeStaffList = $state(false);
+	let includeSubscriberList = $state(false);
 
 	// Tier 2 toggles — all default off, matching the backend defaults.
 	let includeMentionGraph = $state(false);
@@ -49,14 +133,167 @@
 	let includeLanguageByDay = $state(false);
 	let includeQuoteReplies = $state(false);
 
+	type Preset = 'quick' | 'standard' | 'everything';
+
+	/** Toggles only — numeric params (top_n, gaps, sigma) are untouched. */
+	function applyPreset(preset: Preset) {
+		const quick = preset === 'quick';
+		const everything = preset === 'everything';
+
+		includeCommands = true;
+		includeLinks = true;
+		includeMentions = true;
+		includeDuplicates = true;
+		includeSessions = true;
+		includeConcentration = !quick;
+		includeMessageClass = true;
+		includeNewReturning = !quick;
+		includeEmotePairs = !quick;
+		includeEngagement = true;
+		includeAnomalies = !quick;
+		includeCopyPaste = !quick;
+		includeStaffList = !quick;
+		includeSubscriberList = !quick;
+		includePhrases = everything;
+		// Language needs the optional `langdetect` package on the backend, so
+		// only "Everything" turns it on — Quick/Standard leave it off.
+		includeLanguage = everything;
+
+		includeMentionGraph = everything;
+		includeMutualMentions = everything;
+		includeEmoteCentrality = everything;
+		includeEmoteEntropy = everything;
+		includeLorenz = everything;
+		includeBotScores = everything;
+		includeLengthTrend = everything;
+		includeCohortRetention = everything;
+		// Must mirror includeLanguage: the checkbox is disabled when language is off.
+		includeLanguageByDay = everything;
+		includeQuoteReplies = everything;
+	}
+
 	let forceRefresh = $state(false);
+	let comparePrevious = $state(false);
+	let comparisonMode = $state<ComparisonMode>('previous_period');
+	let compareFromDate = $state('');
+	let compareToDate = $state('');
 	let loading = $state(false);
 	let error = $state('');
 	let jobProgress = $state<number | null>(null);
 	let jobMessage = $state('');
 	let stats = $state<ChatStatsResult | null>(null);
+	let exportOpen = $state(false);
+	let copiedSummary = $state(false);
 
-	/** Same pattern as HarambelogsPanel: local naive input → UTC RFC 3339. */
+	/** Post-run view tab: 'pooled' or a channel name from stats.per_channel. */
+	let activeChannelTab = $state<string>('pooled');
+
+	const displayStats = $derived.by(() => {
+		if (!stats) return null;
+		if (activeChannelTab === 'pooled') return stats;
+		return stats.per_channel.find((c) => c.channel === activeChannelTab) || stats;
+	});
+
+	/** Label for export filenames / summary headers — follows the viewed tab. */
+	const viewChannelLabel = $derived(
+		activeChannelTab === 'pooled' ? channelLabel : activeChannelTab
+	);
+
+	// Reset to the pooled view whenever a new result arrives.
+	$effect(() => {
+		if (stats) {
+			activeChannelTab = 'pooled';
+		}
+	});
+
+	async function handleCopySummary() {
+		const s = displayStats ?? stats;
+		if (!s) return;
+		await copySummaryToClipboard(
+			s,
+			viewChannelLabel,
+			toRFC3339(fromDate) ?? '',
+			toRFC3339(toDate) ?? ''
+		);
+		copiedSummary = true;
+		setTimeout(() => (copiedSummary = false), 1500);
+	}
+
+	/** Snapshot the current result for export handlers (TS can't narrow
+	 * `$state` inside closures even under an enclosing `{#if stats}`). */
+	function withStats(fn: (s: ChatStatsResult) => void) {
+		const s = displayStats ?? stats;
+		if (s) fn(s);
+	}
+
+	/** Drill into a top chatter: scope the next run to that user. */
+	function drillUser(username: string) {
+		userFilter = username;
+		userFilterType = 'user';
+		void runStats();
+	}
+
+	/** Switch the stat scope and re-run so every number honors it. */
+	function setScope(scope: ChannelScope) {
+		if (scope === channelScope) return;
+		channelScope = scope;
+		void runStats();
+	}
+
+	function drillChannel(channel: string) {
+		setScope(channel);
+	}
+
+	// Close the export dropdown on any outside click while it is open.
+	$effect(() => {
+		if (!exportOpen) return;
+		const close = () => (exportOpen = false);
+		// Defer so the click that opened the menu doesn't immediately close it.
+		const t = setTimeout(() => window.addEventListener('click', close), 0);
+		return () => {
+			clearTimeout(t);
+			window.removeEventListener('click', close);
+		};
+	});
+
+	// When the mode stops being 'custom', clear the custom date fields so the
+	// next run doesn't accidentally send stale values.
+	$effect(() => {
+		if (comparisonMode !== 'custom') {
+			compareFromDate = '';
+			compareToDate = '';
+		}
+	});
+
+	/** Local naive datetime-local input value for a Date (no timezone suffix). */
+	function toLocalInputValue(d: Date): string {
+		const pad = (n: number) => String(n).padStart(2, '0');
+		return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+	}
+
+	function setRange(days: number) {
+		// Truncate "to" to the top of the current hour without mutating a Date
+		// (svelte/prefer-svelte-reactivity flags in-place mutation).
+		const now = new Date();
+		const to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+
+		if (days === 0) {
+			// "All": clamp to the backend's max_range_days ceiling (3660) and let
+			// the fetcher further clamp to the channel's actual logged calendar.
+			maxRangeDays = 3660;
+			// 3650 < 3660 leaves headroom for DST / leap-day drift so the
+			// backend's span check never trips on an off-by-one.
+			const from = new Date(to.getTime() - 3650 * 24 * 60 * 60 * 1000);
+			fromDate = toLocalInputValue(from);
+			toDate = toLocalInputValue(to);
+			return;
+		}
+
+		const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
+		fromDate = toLocalInputValue(from);
+		toDate = toLocalInputValue(to);
+	}
+
 	function toRFC3339(value: string): string | undefined {
 		if (!value) return undefined;
 		const d = new Date(value);
@@ -64,32 +301,53 @@
 	}
 
 	function validate(): string | null {
-		if (!channel.trim()) return 'Channel is required.';
+		// Normalize: Svelte can hand us strings from number inputs depending
+		// on runtime coercion. Coerce once here so every downstream check is
+		// against real numbers.
+		const topNNum = Number(topN);
+		const topWordsNum = Number(topWordsN);
+		const topEmotesNum = Number(topEmotesN);
+		const topPhrasesNum = Number(topPhrasesN);
+		const gapNum = Number(sessionGapMinutes);
+		const sigmaNum = Number(anomalySigma);
+		const maxRangeNum = Number(maxRangeDays);
+
+		if (nonEmptyChannels.length === 0) return 'At least one channel is required.';
+		if (nonEmptyChannels.length > 3) return 'At most 3 channels are supported.';
 		// Upstream 303-redirects unbounded log requests, so a date range is mandatory.
 		if (!fromDate || !toDate) return 'Both from and to dates are required.';
 		if (new Date(fromDate).getTime() >= new Date(toDate).getTime()) {
 			return 'The from-date must be before the to-date.';
 		}
-		if (!Number.isInteger(topN) || topN < 5 || topN > 100) {
+		if (!Number.isInteger(topNNum) || topNNum < 5 || topNNum > 100) {
 			return 'Top N must be an integer between 5 and 100.';
 		}
-		if (!Number.isInteger(topWordsN) || topWordsN < 10 || topWordsN > 200) {
+		if (!Number.isInteger(topWordsNum) || topWordsNum < 10 || topWordsNum > 200) {
 			return 'Top words must be an integer between 10 and 200.';
 		}
-		if (!Number.isInteger(topEmotesN) || topEmotesN < 10 || topEmotesN > 200) {
+		if (!Number.isInteger(topEmotesNum) || topEmotesNum < 10 || topEmotesNum > 200) {
 			return 'Top emotes must be an integer between 10 and 200.';
 		}
-		if (!Number.isInteger(topPhrasesN) || topPhrasesN < 0 || topPhrasesN > 50) {
+		if (!Number.isInteger(topPhrasesNum) || topPhrasesNum < 0 || topPhrasesNum > 50) {
 			return 'Top phrases must be an integer between 0 and 50.';
 		}
-		if (!Number.isInteger(sessionGapMinutes) || sessionGapMinutes < 2 || sessionGapMinutes > 120) {
+		if (!Number.isInteger(gapNum) || gapNum < 2 || gapNum > 120) {
 			return 'Session gap must be an integer between 2 and 120 minutes.';
 		}
-		if (Number.isNaN(anomalySigma) || anomalySigma < 1.0 || anomalySigma > 6.0) {
+		// Number.isNaN missed undefined; Number.isFinite is the strict check.
+		if (!Number.isFinite(sigmaNum) || sigmaNum < 1.0 || sigmaNum > 6.0) {
 			return 'Anomaly sigma must be between 1.0 and 6.0.';
 		}
-		if (!Number.isInteger(maxRangeDays) || maxRangeDays < 1 || maxRangeDays > 3660) {
+		if (!Number.isInteger(maxRangeNum) || maxRangeNum < 1 || maxRangeNum > 3660) {
 			return 'Max range must be an integer between 1 and 3660 days.';
+		}
+		if (comparePrevious && comparisonMode === 'custom') {
+			if (!compareFromDate || !compareToDate) {
+				return 'Custom comparison requires both compare dates.';
+			}
+			if (new Date(compareFromDate).getTime() >= new Date(compareToDate).getTime()) {
+				return 'Compare from-date must be before the compare to-date.';
+			}
 		}
 		return null;
 	}
@@ -111,7 +369,9 @@
 
 		try {
 			const job = await api.createJob('chat_stats', {
-				channel: channel.trim(),
+				channels: effectiveChannels,
+				// Keep `channel` for legacy readers; only meaningful for single-channel runs.
+				channel: effectiveChannels.length === 1 ? effectiveChannels[0] : undefined,
 				channel_id_type: channelType,
 				// `undefined` is dropped by JSON.stringify, so the backend's
 				// `user=None` default kicks in for whole-channel runs.
@@ -137,6 +397,8 @@
 				include_anomalies: includeAnomalies,
 				include_language: includeLanguage,
 				include_copy_paste_chains: includeCopyPaste,
+				include_staff_list: includeStaffList,
+				include_subscriber_list: includeSubscriberList,
 				// Tier 2 — gated so the backend skips work unless requested.
 				include_mention_graph: includeMentionGraph,
 				include_mutual_mentions: includeMutualMentions,
@@ -151,6 +413,12 @@
 				session_gap_minutes: sessionGapMinutes,
 				anomaly_sigma: anomalySigma,
 				force_refresh: forceRefresh,
+				compare_previous: comparePrevious,
+				comparison_mode: comparisonMode,
+				compare_from_date:
+					comparePrevious && comparisonMode === 'custom' ? toRFC3339(compareFromDate) : undefined,
+				compare_to_date:
+					comparePrevious && comparisonMode === 'custom' ? toRFC3339(compareToDate) : undefined,
 				max_range_days: maxRangeDays
 			});
 			const done = await api.waitJob(job.job_id, (j) => {
@@ -194,105 +462,17 @@
 	const phaseLabel = $derived(describePhase(jobMessage));
 	const isPerUser = $derived(userFilter.trim().length > 0);
 
-	const maxHour = $derived(stats ? Math.max(1, ...stats.activity_by_hour) : 1);
-	const maxHeat = $derived(stats ? Math.max(1, ...stats.activity_by_weekday_hour.flat()) : 1);
-	const maxTop = $derived(
-		stats && stats.top_chatters.length > 0
-			? Math.max(...stats.top_chatters.map((t) => t.messageCount))
-			: 1
-	);
-	const maxDay = $derived(
-		stats && stats.messages_per_day.length > 0
-			? Math.max(...stats.messages_per_day.map((d) => d.count))
-			: 1
-	);
-	const maxWord = $derived(
-		stats && stats.top_words.length > 0 ? Math.max(...stats.top_words.map((w) => w.count)) : 1
-	);
-	const maxEmote = $derived(
-		stats && stats.top_emotes.length > 0 ? Math.max(...stats.top_emotes.map((e) => e.count)) : 1
-	);
-	const maxEmotePair = $derived(
-		stats && stats.top_emote_pairs.length > 0
-			? Math.max(...stats.top_emote_pairs.map((p) => p.count))
-			: 1
-	);
-	const maxCommand = $derived(
-		stats && stats.top_commands.length > 0 ? Math.max(...stats.top_commands.map((c) => c.count)) : 1
-	);
-	const maxDomain = $derived(
-		stats && stats.top_domains.length > 0 ? Math.max(...stats.top_domains.map((d) => d.count)) : 1
-	);
-	const maxMention = $derived(
-		stats && stats.top_mentions.length > 0 ? Math.max(...stats.top_mentions.map((m) => m.count)) : 1
-	);
-	const maxRepeated = $derived(
-		stats && stats.top_repeated_messages.length > 0
-			? Math.max(...stats.top_repeated_messages.map((r) => r.count))
-			: 1
-	);
-	const maxPhrase = $derived(
-		stats && stats.top_phrases.length > 0 ? Math.max(...stats.top_phrases.map((p) => p.count)) : 1
-	);
-	const maxCopyPaste = $derived(
-		stats && stats.top_copy_paste_chains.length > 0
-			? Math.max(...stats.top_copy_paste_chains.map((c) => c.occurrences))
-			: 1
-	);
-	const maxDiversity = $derived(
-		stats && stats.emote_diversity.length > 0
-			? Math.max(...stats.emote_diversity.map((d) => d.total_emote_uses))
-			: 1
-	);
-	const maxFirstHour = $derived(
-		stats && stats.first_message_hours.length > 0 ? Math.max(1, ...stats.first_message_hours) : 1
-	);
-	const maxNewChatter = $derived(
-		stats && stats.daily_new_chatters.length > 0
-			? Math.max(...stats.daily_new_chatters.map((d) => d.count))
-			: 1
-	);
-	const maxReturningChatter = $derived(
-		stats && stats.daily_returning_chatters.length > 0
-			? Math.max(...stats.daily_returning_chatters.map((d) => d.count))
-			: 1
-	);
-	const maxTrendCount = $derived(
-		stats && stats.trend_by_day.length > 0 ? Math.max(...stats.trend_by_day.map((p) => p.count)) : 1
-	);
-	const maxMentionDegree = $derived(
-		stats && stats.mention_graph.length > 0
-			? Math.max(...stats.mention_graph.map((d) => d.degree))
-			: 1
-	);
-	const maxMutualTotal = $derived(
-		stats && stats.mutual_mention_pairs.length > 0
-			? Math.max(...stats.mutual_mention_pairs.map((p) => p.total))
-			: 1
-	);
-	const maxEmoteCentrality = $derived(
-		stats && stats.emote_centrality.length > 0
-			? Math.max(...stats.emote_centrality.map((c) => c.distinct_co_occurrences))
-			: 1
-	);
-	const maxBotScore = $derived(
-		stats && stats.bot_likelihood.length > 0
-			? Math.max(...stats.bot_likelihood.map((b) => b.score))
-			: 1
-	);
-	const maxQuoteReply = $derived(
-		stats && stats.quote_reply_pairs.length > 0
-			? Math.max(...stats.quote_reply_pairs.map((p) => p.count))
-			: 1
-	);
-	const maxCohortOffset = $derived(
-		stats && stats.cohort_retention.length > 0
-			? Math.max(...stats.cohort_retention.flatMap((r) => r.retention.map((c) => c.week_offset)))
-			: 0
-	);
+	const resultSections: ResultNavSection[] = [
+		{ id: 'rs-overview', label: 'Overview' },
+		{ id: 'rs-activity', label: 'Activity & Time' },
+		{ id: 'rs-words', label: 'Words & Emotes' },
+		{ id: 'rs-links', label: 'Links & Commands' },
+		{ id: 'rs-users', label: 'User Behavior' },
+		{ id: 'rs-advanced', label: 'Advanced' }
+	];
 </script>
 
-<Card class="w-120 shadow-xl backdrop-blur-sm">
+<Card class="w-full max-w-4xl shadow-xl backdrop-blur-sm">
 	<Header class="pt-6">
 		<Title class="text-center text-2xl font-bold">Chat Statistics</Title>
 		<p class="text-muted-foreground text-center text-sm">
@@ -300,22 +480,127 @@
 		</p>
 	</Header>
 	<Content class="space-y-4 p-6">
-		<div class="grid grid-cols-2 gap-3">
-			<div>
-				<Label for="cs-channel-type">Channel Type</Label>
-				<select
-					id="cs-channel-type"
-					bind:value={channelType}
-					class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-				>
-					<option value="channel">channel</option>
-					<option value="channelid">channelid</option>
-				</select>
+		<div>
+			<Label>Channels ({channels.length}/3)</Label>
+			<div class="mt-1 space-y-2">
+				{#each channels as ch, i (i)}
+					<div class="flex gap-2">
+						<!-- Wrapper anchors the absolutely-positioned dropdown to the input. -->
+						<div class="relative flex-1">
+							<Input
+								bind:value={channels[i]}
+								placeholder="e.g., demonzz1"
+								aria-label={ch.trim() ? `Channel: ${ch.trim()}` : `Channel ${i + 1}`}
+								autocomplete="off"
+								onfocus={() => {
+									activeChannelDropdown = i;
+									void loadChannels();
+								}}
+								onblur={() => {
+									// Delay so the dropdown item's mousedown/click can land
+									// before blur closes the menu.
+									setTimeout(() => {
+										if (activeChannelDropdown === i) activeChannelDropdown = -1;
+									}, 150);
+								}}
+							/>
+
+							{#if activeChannelDropdown === i}
+								{@const suggestions = channelSuggestions(channels[i] ?? '', i)}
+								<div
+									class="bg-popover text-popover-foreground border-border absolute top-full left-0 z-30 mt-1 max-h-56 w-full overflow-auto rounded-md border shadow-md"
+									role="listbox"
+									tabindex="-1"
+									onmousedown={(e) => e.preventDefault()}
+								>
+									{#if channelsLoading && !channelsLoaded}
+										<p class="text-muted-foreground px-3 py-2 text-xs">Loading channels…</p>
+									{:else if suggestions.length === 0}
+										<p class="text-muted-foreground px-3 py-2 text-xs">
+											{availableChannels.length === 0
+												? 'Channel list unavailable — type a name manually.'
+												: 'No matches.'}
+										</p>
+									{:else}
+										{#each suggestions as name (name)}
+											<button
+												type="button"
+												role="option"
+												aria-selected={name === channels[i]}
+												class="hover:bg-accent hover:text-accent-foreground block w-full truncate px-3 py-1.5 text-left text-xs"
+												onclick={() => pickChannel(i, name)}
+											>
+												{name}
+											</button>
+										{/each}
+									{/if}
+								</div>
+							{/if}
+						</div>
+
+						{#if channels.length > 1}
+							<Button
+								variant="outline"
+								size="icon"
+								onclick={() => removeChannel(i)}
+								aria-label="Remove channel"
+							>
+								×
+							</Button>
+						{/if}
+					</div>
+				{/each}
+				{#if channels.length < 3}
+					<Button variant="outline" size="sm" onclick={addChannel}>Add channel</Button>
+				{/if}
 			</div>
+			<p class="text-muted-foreground mt-1 text-xs">
+				Up to 3 channels. Messages are pooled; per-channel cards appear below.
+			</p>
+		</div>
+
+		{#if nonEmptyChannels.length > 1}
 			<div>
-				<Label for="cs-channel">Channel</Label>
-				<Input id="cs-channel" bind:value={channel} placeholder="e.g., demonzz1" class="mt-1" />
+				<Label>Stat scope</Label>
+				<div class="border-border/60 mt-1 inline-flex rounded-md border p-0.5">
+					<button
+						type="button"
+						class="rounded px-2.5 py-1 text-xs transition-colors {channelScope === 'all'
+							? 'bg-primary text-primary-foreground'
+							: 'text-muted-foreground hover:bg-muted'}"
+						onclick={() => setScope('all')}
+					>
+						All (pooled)
+					</button>
+					{#each nonEmptyChannels as ch (ch)}
+						<button
+							type="button"
+							class="rounded px-2.5 py-1 text-xs transition-colors {channelScope === ch
+								? 'bg-primary text-primary-foreground'
+								: 'text-muted-foreground hover:bg-muted'}"
+							onclick={() => setScope(ch)}
+						>
+							{ch} only
+						</button>
+					{/each}
+				</div>
+				<p class="text-muted-foreground mt-1 text-xs">
+					Pooled shows combined stats across all channels. Pick a single channel to scope every
+					number on this page — top chatters, emotes, commands, links, everything.
+				</p>
 			</div>
+		{/if}
+
+		<div>
+			<Label for="cs-channel-type">Channel Type</Label>
+			<select
+				id="cs-channel-type"
+				bind:value={channelType}
+				class="border-input bg-background ring-offset-background focus-visible:ring-ring mt-1 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+			>
+				<option value="channel">channel</option>
+				<option value="channelid">channelid</option>
+			</select>
 		</div>
 
 		<div class="grid grid-cols-2 gap-3">
@@ -342,6 +627,11 @@
 		</div>
 
 		<div>
+			<div class="mb-1 flex flex-wrap gap-1.5">
+				{#each [{ label: '24h', days: 1 }, { label: '7d', days: 7 }, { label: '30d', days: 30 }, { label: '90d', days: 90 }, { label: '360d', days: 360 }, { label: 'All', days: 0 }] as p (p.label)}
+					<Button size="sm" variant="outline" onclick={() => setRange(p.days)}>{p.label}</Button>
+				{/each}
+			</div>
 			<div class="grid grid-cols-2 gap-3">
 				<div>
 					<Label for="cs-from">From</Label>
@@ -452,203 +742,298 @@
 			</div>
 		</div>
 
-		<fieldset class="grid grid-cols-2 gap-x-3 gap-y-1 text-sm">
-			<legend class="mb-1 text-sm font-medium">Sections</legend>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+		<div class="flex flex-wrap items-center gap-2">
+			<span class="text-muted-foreground text-xs font-medium">Preset:</span>
+			<Button size="sm" variant="outline" onclick={() => applyPreset('quick')}>Quick</Button>
+			<Button size="sm" variant="outline" onclick={() => applyPreset('standard')}>Standard</Button>
+			<Button size="sm" variant="outline" onclick={() => applyPreset('everything')}
+				>Everything</Button
+			>
+		</div>
+
+		<details class="border-border/60 group rounded-md border">
+			<summary
+				class="hover:bg-muted/50 flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm font-medium"
+			>
+				<span>Sections</span>
+				<span class="text-muted-foreground text-xs group-open:hidden">
+					{[
+						includeCommands,
+						includeLinks,
+						includeMentions,
+						includeDuplicates,
+						includeSessions,
+						includeConcentration,
+						includeMessageClass,
+						includeNewReturning,
+						includeEmotePairs,
+						includeEngagement,
+						includeAnomalies,
+						includeCopyPaste,
+						includeStaffList,
+						includeSubscriberList,
+						includePhrases,
+						includeLanguage
+					].filter(Boolean).length}
+					on
+				</span>
+			</summary>
+			<div class="grid grid-cols-2 gap-1.5 p-3 pt-0 sm:grid-cols-3">
+				<ToggleChip
 					bind:checked={includeCommands}
-					class="accent-primary h-4 w-4"
-				/><span>Commands</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input type="checkbox" bind:checked={includeLinks} class="accent-primary h-4 w-4" /><span
-					>Links</span
-				></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Commands"
+					title="Messages starting with '!' — usage count and unique users per command."
+				/>
+				<ToggleChip
+					bind:checked={includeLinks}
+					label="Links"
+					title="URL extraction: top domains plus a platform breakdown (Twitch clips, YouTube, Discord, X, Kick)."
+				/>
+				<ToggleChip
 					bind:checked={includeMentions}
-					class="accent-primary h-4 w-4"
-				/><span>Mentions</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Mentions"
+					title="@username extraction: most-mentioned users and the most frequent mention pairs."
+				/>
+				<ToggleChip
 					bind:checked={includeDuplicates}
-					class="accent-primary h-4 w-4"
-				/><span>Duplicates</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Duplicates"
+					title="Identical messages posted more than once, with the most repeated texts."
+				/>
+				<ToggleChip
 					bind:checked={includeSessions}
-					class="accent-primary h-4 w-4"
-				/><span>Sessions</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Sessions"
+					title="Per-user activity bursts: a gap of N minutes or more starts a new session."
+				/>
+				<ToggleChip
 					bind:checked={includeConcentration}
-					class="accent-primary h-4 w-4"
-				/><span>Concentration</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Concentration"
+					title="Gini coefficient and top-10% message share — how concentrated chat is among the top chatters."
+				/>
+				<ToggleChip
 					bind:checked={includeMessageClass}
-					class="accent-primary h-4 w-4"
-				/><span>Message classes</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Message classes"
+					title="Message shape buckets: questions, exclamations, ALL CAPS, emote-only, short and long messages."
+				/>
+				<ToggleChip
 					bind:checked={includeNewReturning}
-					class="accent-primary h-4 w-4"
-				/><span>New vs returning</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="New vs returning"
+					title="Per-day counts of chatters seen for the first time in the range vs. those seen before."
+				/>
+				<ToggleChip
 					bind:checked={includeEmotePairs}
-					class="accent-primary h-4 w-4"
-				/><span>Emote pairs</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Emote pairs"
+					title="Emotes co-occurring within the same message, ranked by frequency."
+				/>
+				<ToggleChip
 					bind:checked={includeEngagement}
-					class="accent-primary h-4 w-4"
-				/><span>Engagement score</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Engagement score"
+					title="Composite 0–1 score per user (messages, active days, avg length). Adds a column to top chatters."
+				/>
+				<ToggleChip
 					bind:checked={includeAnomalies}
-					class="accent-primary h-4 w-4"
-				/><span>Anomalies</span></label
-			>
-			<label class="flex items-center gap-2"
-				><input type="checkbox" bind:checked={includePhrases} class="accent-primary h-4 w-4" /><span
-					>Phrases</span
-				></label
-			>
-			<label class="flex items-center gap-2"
-				><input
-					type="checkbox"
+					label="Anomalies"
+					title="5-minute windows whose message count deviates from the mean by at least N standard deviations."
+				/>
+				<ToggleChip
+					bind:checked={includePhrases}
+					label="Phrases"
+					title="Most common two-word sequences (bigrams) after URL and mention stripping."
+				/>
+				<ToggleChip
 					bind:checked={includeCopyPaste}
-					class="accent-primary h-4 w-4"
-				/><span>Copy-paste chains</span></label
-			>
-			<label
-				class="flex items-center gap-2"
-				title="Requires the optional langdetect package on the backend"
-			>
-				<input type="checkbox" bind:checked={includeLanguage} class="accent-primary h-4 w-4" /><span
-					>Language (optional)</span
-				>
-			</label>
-		</fieldset>
+					label="Copy-paste chains"
+					title="Same text reposted by different users within a short window (raids / copypasta)."
+				/>
+				<ToggleChip
+					bind:checked={includeStaffList}
+					label="Mods & VIPs list"
+					title="Everyone with a mod or VIP badge in the range: message count + first/last seen."
+				/>
+				<ToggleChip
+					bind:checked={includeSubscriberList}
+					label="Subscribers list"
+					title="Subscribers who sent at least one message in range, ranked by volume. Capped; the header shows the true count."
+				/>
+				<ToggleChip
+					bind:checked={includeLanguage}
+					label="Language (optional)"
+					title="Per-language breakdown. Requires the optional langdetect package on the backend."
+				/>
+			</div>
+		</details>
 
-		<fieldset class="grid grid-cols-2 gap-x-3 gap-y-1 text-sm">
-			<legend class="mb-1 text-sm font-medium">Advanced (Tier 2)</legend>
-			<label class="flex items-center gap-2">
-				<input type="checkbox" bind:checked={includeMentionGraph} class="accent-primary h-4 w-4" />
-				<span>Mention graph</span>
-			</label>
-			<label class="flex items-center gap-2">
-				<input
-					type="checkbox"
+		<details class="border-border/60 group rounded-md border">
+			<summary
+				class="hover:bg-muted/50 flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm font-medium"
+			>
+				<span>Advanced (Tier 2)</span>
+				<span class="text-muted-foreground text-xs group-open:hidden">
+					{[
+						includeMentionGraph,
+						includeMutualMentions,
+						includeEmoteCentrality,
+						includeEmoteEntropy,
+						includeLorenz,
+						includeBotScores,
+						includeLengthTrend,
+						includeCohortRetention,
+						includeQuoteReplies,
+						includeLanguage && includeLanguageByDay
+					].filter(Boolean).length}
+					on
+				</span>
+			</summary>
+			<div class="grid grid-cols-2 gap-1.5 p-3 pt-0 sm:grid-cols-3">
+				<ToggleChip
+					bind:checked={includeMentionGraph}
+					label="Mention graph"
+					title="In/out degree per user from @mentions — who mentions, and who gets mentioned."
+				/>
+				<ToggleChip
 					bind:checked={includeMutualMentions}
-					class="accent-primary h-4 w-4"
+					label="Mutual mentions"
+					title="Pairs of users who mention each other (both directions)."
 				/>
-				<span>Mutual mentions</span>
-			</label>
-			<label class="flex items-center gap-2">
-				<input
-					type="checkbox"
+				<ToggleChip
 					bind:checked={includeEmoteCentrality}
-					class="accent-primary h-4 w-4"
+					label="Emote centrality"
+					title="Emotes ranked by how many distinct other emotes they co-occur with — the 'connector' emotes."
 				/>
-				<span>Emote centrality</span>
-			</label>
-			<label class="flex items-center gap-2">
-				<input type="checkbox" bind:checked={includeEmoteEntropy} class="accent-primary h-4 w-4" />
-				<span>Emote entropy</span>
-			</label>
-			<label class="flex items-center gap-2">
-				<input type="checkbox" bind:checked={includeLorenz} class="accent-primary h-4 w-4" />
-				<span>Lorenz curve</span>
-			</label>
-			<label class="flex items-center gap-2">
-				<input type="checkbox" bind:checked={includeBotScores} class="accent-primary h-4 w-4" />
-				<span>Bot likelihood</span>
-			</label>
-			<label class="flex items-center gap-2">
-				<input type="checkbox" bind:checked={includeLengthTrend} class="accent-primary h-4 w-4" />
-				<span>Length trend</span>
-			</label>
-			<label class="flex items-center gap-2">
-				<input
-					type="checkbox"
+				<ToggleChip
+					bind:checked={includeEmoteEntropy}
+					label="Emote entropy"
+					title="Shannon entropy (bits) of the emote frequency distribution. 0 = one emote dominates."
+				/>
+				<ToggleChip
+					bind:checked={includeLorenz}
+					label="Lorenz curve"
+					title="Fixed points on the Lorenz curve: message share held by the top 1 / 5 / 10 / 25 / 50%."
+				/>
+				<ToggleChip
+					bind:checked={includeBotScores}
+					label="Bot likelihood"
+					title="Heuristic 0–1 score from regular intervals, low text diversity, and command spam."
+				/>
+				<ToggleChip
+					bind:checked={includeLengthTrend}
+					label="Length trend"
+					title="OLS slope of daily average message length (chars/day). Positive = messages getting longer."
+				/>
+				<ToggleChip
 					bind:checked={includeCohortRetention}
-					class="accent-primary h-4 w-4"
+					label="Cohort retention"
+					title="Weekly signup cohorts × trailing retention over up to 8 weeks."
 				/>
-				<span>Cohort retention</span>
-			</label>
-			<label class="flex items-center gap-2">
-				<input type="checkbox" bind:checked={includeQuoteReplies} class="accent-primary h-4 w-4" />
-				<span>Quote replies</span>
-			</label>
-			<label
-				class="flex items-center gap-2"
-				title="Also requires 'Language (optional)' to be enabled"
-			>
+				<ToggleChip
+					bind:checked={includeQuoteReplies}
+					label="Quote replies"
+					title="Inferred A→B replies: A mentions @B within 5 minutes of B's last message."
+				/>
+				<ToggleChip
+					bind:checked={includeLanguageByDay}
+					label="Language by day"
+					title="Top language per calendar day. Also requires 'Language (optional)' to be enabled."
+					disabled={!includeLanguage}
+				/>
+			</div>
+		</details>
+
+		<div
+			class="bg-card/95 sticky bottom-0 z-10 -mx-6 mt-2 space-y-2 border-t px-6 pt-3 pb-1 backdrop-blur"
+		>
+			{#if jobProgress !== null}
+				<div>
+					<div class="bg-muted h-2 overflow-hidden rounded">
+						<div
+							class="h-full bg-teal-500 transition-all"
+							style="width: {Math.round(jobProgress)}%"
+						></div>
+					</div>
+					<p class="mt-1 text-xs font-medium" data-testid="cs-phase">
+						{phaseLabel}
+						{Math.round(jobProgress)}%
+					</p>
+					{#if jobMessage}
+						<p class="text-muted-foreground text-xs" data-testid="cs-phase-detail">{jobMessage}</p>
+					{/if}
+				</div>
+			{/if}
+
+			<label class="flex cursor-pointer items-center gap-2 text-sm">
 				<input
 					type="checkbox"
-					bind:checked={includeLanguageByDay}
-					disabled={!includeLanguage}
-					class="accent-primary h-4 w-4"
+					bind:checked={forceRefresh}
+					class="accent-primary h-4 w-4 rounded border-gray-300"
 				/>
-				<span>Language by day</span>
+				<span>Bypass cache (re-download)</span>
 			</label>
-		</fieldset>
 
-		{#if jobProgress !== null}
-			<div>
-				<div class="bg-muted h-2 overflow-hidden rounded">
-					<div
-						class="h-full bg-teal-500 transition-all"
-						style="width: {Math.round(jobProgress)}%"
-					></div>
-				</div>
-				<p class="mt-1 text-xs font-medium" data-testid="cs-phase">
-					{phaseLabel}
-					{Math.round(jobProgress)}%
-				</p>
-				{#if jobMessage}
-					<p class="text-muted-foreground text-xs" data-testid="cs-phase-detail">{jobMessage}</p>
+			<div class="flex flex-wrap items-center justify-between gap-3">
+				<label class="flex cursor-pointer items-center gap-2 text-sm">
+					<input
+						type="checkbox"
+						bind:checked={comparePrevious}
+						class="accent-primary h-4 w-4 rounded border-gray-300"
+					/>
+					<span>Compare to previous period</span>
+				</label>
+				{#if comparePrevious}
+					<select
+						bind:value={comparisonMode}
+						class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-8 rounded-md border px-2 text-xs shadow-xs transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+					>
+						<option value="previous_period">Same-length window</option>
+						<option value="previous_week">Previous week</option>
+						<option value="previous_month">Previous 30 days</option>
+						<option value="previous_year">Previous year</option>
+						<option value="custom">Custom range</option>
+					</select>
 				{/if}
 			</div>
-		{/if}
+
+			{#if comparePrevious && comparisonMode === 'custom'}
+				<div class="grid grid-cols-2 gap-3">
+					<div>
+						<Label for="cs-cmp-from" class="text-xs">Compare from</Label>
+						<Input
+							id="cs-cmp-from"
+							type="datetime-local"
+							bind:value={compareFromDate}
+							class="mt-1 h-8 text-xs"
+						/>
+					</div>
+					<div>
+						<Label for="cs-cmp-to" class="text-xs">Compare to</Label>
+						<Input
+							id="cs-cmp-to"
+							type="datetime-local"
+							bind:value={compareToDate}
+							class="mt-1 h-8 text-xs"
+						/>
+					</div>
+				</div>
+			{/if}
+
+			{#if isPerUser}
+				<button
+					type="button"
+					class="border-border/60 hover:bg-muted flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs"
+					onclick={() => (userFilter = '')}
+					title="Remove the per-user filter and return to whole-channel stats"
+				>
+					<span>User filter: <span class="font-medium">{userFilter}</span></span>
+					<span class="text-muted-foreground">×</span>
+				</button>
+			{/if}
+
+			<Button onclick={runStats} disabled={loading || !backend.ready} class="w-full">
+				{loading ? 'Analyzing…' : 'Run stats'}
+			</Button>
+		</div>
 
 		{#if error}
 			<p class="text-sm text-red-500">{error}</p>
 		{/if}
-
-		<label class="flex cursor-pointer items-center gap-2 text-sm">
-			<input
-				type="checkbox"
-				bind:checked={forceRefresh}
-				class="accent-primary h-4 w-4 rounded border-gray-300"
-			/>
-			<span>Bypass cache (re-download)</span>
-		</label>
-
-		<Button onclick={runStats} disabled={loading || !backend.ready} class="w-full">
-			{loading ? 'Analyzing…' : 'Run stats'}
-		</Button>
 
 		{#if stats}
 			{#if stats.from_cache}
@@ -662,746 +1047,181 @@
 					Freshly downloaded — next run will reuse the local cache.
 				</p>
 			{/if}
-			{#if stats.truncated}
+			{#if (displayStats ?? stats).truncated}
 				<p class="text-sm text-amber-500">
 					Result truncated: channel exceeded the fetch cap — stats cover a partial window.
 				</p>
 			{/if}
-			{#if stats.warnings.length > 0}
+			{#if (displayStats ?? stats).warnings.length > 0}
 				<div class="rounded border border-amber-500/40 bg-amber-500/10 p-2">
-					{#each stats.warnings as warning (warning)}
+					{#each (displayStats ?? stats).warnings as warning (warning)}
 						<p class="text-sm text-amber-500">{warning}</p>
 					{/each}
 				</div>
 			{/if}
 
-			<div class="grid grid-cols-2 gap-2 text-center">
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold" data-testid="cs-total">
-						{stats.total_messages.toLocaleString()}
-					</div>
-					<div class="text-muted-foreground text-xs">messages</div>
-				</div>
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold">{stats.unique_chatters.toLocaleString()}</div>
-					<div class="text-muted-foreground text-xs">chatters</div>
-				</div>
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold">{stats.days_spanned}</div>
-					<div class="text-muted-foreground text-xs">days spanned</div>
-				</div>
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold">{stats.avg_message_length.toFixed(1)}</div>
-					<div class="text-muted-foreground text-xs">avg length</div>
-				</div>
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold">
-						{stats.median_message_length != null ? stats.median_message_length.toFixed(1) : '—'}
-					</div>
-					<div class="text-muted-foreground text-xs">median length</div>
-				</div>
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold">
-						{stats.max_message_length != null ? stats.max_message_length.toLocaleString() : '—'}
-					</div>
-					<div class="text-muted-foreground text-xs">max length</div>
-				</div>
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold">
-						{stats.avg_words_per_message != null ? stats.avg_words_per_message.toFixed(1) : '—'}
-					</div>
-					<div class="text-muted-foreground text-xs">avg words / msg</div>
-				</div>
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold">
-						{stats.vocab_richness != null ? stats.vocab_richness.toFixed(3) : '—'}
-					</div>
-					<div class="text-muted-foreground text-xs">
-						vocab richness ({stats.unique_word_count.toLocaleString()} unique)
-					</div>
-				</div>
-				<div class="bg-muted rounded p-2">
-					<div class="text-xl font-bold">
-						{stats.peak_concurrent_chatters != null
-							? stats.peak_concurrent_chatters.toLocaleString()
-							: '—'}
-					</div>
-					<div class="text-muted-foreground text-xs">
-						peak concurrent{#if stats.peak_concurrent_window}
-							<span title={new Date(stats.peak_concurrent_window).toLocaleString()}> (5m)</span>
-						{/if}
-					</div>
-				</div>
-			</div>
-
-			{#if stats.activity_per_day_stats.avg_active_chatters != null || stats.chatter_message_quantiles.p50 != null}
-				<div class="text-muted-foreground grid grid-cols-2 gap-2 text-xs">
-					{#if stats.activity_per_day_stats.avg_active_chatters != null}
-						<span>
-							Avg active/day: {stats.activity_per_day_stats.avg_active_chatters.toFixed(1)}
-							{#if stats.activity_per_day_stats.peak_active_chatters != null}
-								(peak {stats.activity_per_day_stats.peak_active_chatters})
-							{/if}
-						</span>
-					{/if}
-					{#if stats.chatter_message_quantiles.p50 != null}
-						<span>
-							Msgs/user p50 {stats.chatter_message_quantiles.p50}, p90 {stats
-								.chatter_message_quantiles.p90}
-						</span>
-					{/if}
-				</div>
-			{/if}
-
-			{#if !isPerUser}
-				<div>
-					<p class="mb-1 text-sm font-medium">Top chatters</p>
-					<div class="space-y-1">
-						{#each stats.top_chatters as t (t.user_id)}
-							<div class="flex items-center gap-2 text-xs">
-								<span
-									class="w-24 truncate"
-									title={t.engagement_score != null
-										? `engagement ${t.engagement_score} · ${t.activeDays}d active`
-										: `${t.activeDays}d active`}>{t.username}</span
-								>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-teal-500"
-										style="width: {(t.messageCount / maxTop) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{t.messageCount.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			<div>
-				<p class="mb-1 text-sm font-medium">Activity by hour (UTC)</p>
-				<div class="flex h-20 items-end gap-0.5">
-					{#each stats.activity_by_hour as count, h (h)}
+			<div class="flex justify-end">
+				<div class="relative">
+					<Button
+						size="sm"
+						variant="outline"
+						onclick={() => (exportOpen = !exportOpen)}
+						aria-expanded={exportOpen}
+					>
+						Export
+						<ChevronDown class="size-3.5" />
+					</Button>
+					{#if exportOpen}
 						<div
-							class="flex-1 rounded-t bg-teal-500"
-							style="height: {Math.max(2, (count / maxHour) * 100)}%"
-							title="{h}:00 — {count}"
-						></div>
-					{/each}
-				</div>
-			</div>
-
-			<div>
-				<p class="mb-1 text-sm font-medium">Weekday × hour heatmap (UTC)</p>
-				<div class="grid gap-0.5" style="grid-template-columns: auto repeat(24, minmax(0, 1fr));">
-					{#each stats.activity_by_weekday_hour as row, d (WEEKDAY_LABELS[d])}
-						<span class="text-muted-foreground pr-1 text-right text-[10px]"
-							>{WEEKDAY_LABELS[d]}</span
+							class="bg-popover text-popover-foreground border-border absolute right-0 z-20 mt-1 w-56 rounded-md border p-1 shadow-md"
 						>
-						{#each row as count, h (`${d}-${h}`)}
-							<div
-								class="aspect-square rounded-[2px] bg-teal-500"
-								style="opacity: {count === 0 ? 0.08 : 0.15 + 0.85 * (count / maxHeat)}"
-								title="{WEEKDAY_LABELS[d]} {h}:00 — {count}"
-							></div>
-						{/each}
-					{/each}
-				</div>
-			</div>
-
-			<div>
-				<p class="mb-1 text-sm font-medium">Messages per day</p>
-				<div class="bg-muted flex h-16 max-w-full items-end gap-0.5 overflow-x-auto rounded p-1">
-					{#each stats.messages_per_day as day (day.date)}
-						<div
-							class="min-w-1.5 flex-1 rounded-t bg-teal-500"
-							style="height: {Math.max(3, (day.count / maxDay) * 100)}%"
-							title="{day.date} — {day.count}"
-						></div>
-					{/each}
-				</div>
-			</div>
-
-			{#if stats.daily_new_chatters.length > 0 || stats.daily_returning_chatters.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">New vs returning chatters (per day)</p>
-					<div class="space-y-2">
-						{#if stats.daily_new_chatters.length > 0}
-							<div>
-								<p class="text-muted-foreground text-xs">New</p>
-								<div class="bg-muted flex h-10 items-end gap-0.5 overflow-x-auto rounded p-1">
-									{#each stats.daily_new_chatters as day (day.date)}
-										<div
-											class="min-w-1.5 flex-1 rounded-t bg-emerald-500"
-											style="height: {Math.max(3, (day.count / maxNewChatter) * 100)}%"
-											title="{day.date} — {day.count} new"
-										></div>
-									{/each}
-								</div>
-							</div>
-						{/if}
-						{#if stats.daily_returning_chatters.length > 0}
-							<div>
-								<p class="text-muted-foreground text-xs">Returning</p>
-								<div class="bg-muted flex h-10 items-end gap-0.5 overflow-x-auto rounded p-1">
-									{#each stats.daily_returning_chatters as day (day.date)}
-										<div
-											class="min-w-1.5 flex-1 rounded-t bg-sky-500"
-											style="height: {Math.max(3, (day.count / maxReturningChatter) * 100)}%"
-											title="{day.date} — {day.count} returning"
-										></div>
-									{/each}
-								</div>
-							</div>
-						{/if}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.weekly_seasonality}
-				<div>
-					<p class="mb-1 text-sm font-medium">Weekly seasonality (vs trend)</p>
-					<div class="grid grid-cols-7 gap-0.5">
-						{#each stats.weekly_seasonality as mult, d (WEEKDAY_LABELS[d])}
-							<div
-								class="rounded p-1 text-center text-[10px] {mult >= 1
-									? 'bg-green-500/70'
-									: 'bg-red-500/70'}"
-								style="opacity: {0.25 + 0.75 * Math.min(1, Math.abs(1 - mult) * 4)}"
-								title="{WEEKDAY_LABELS[d]}: {mult}× trend"
+							<button
+								type="button"
+								class="hover:bg-accent hover:text-accent-foreground w-full rounded px-2 py-1.5 text-left text-xs"
+								onclick={() =>
+									withStats((s) => {
+										exportStatsJson(
+											s,
+											viewChannelLabel,
+											toRFC3339(fromDate) ?? '',
+											toRFC3339(toDate) ?? ''
+										);
+										exportOpen = false;
+									})}
 							>
-								{WEEKDAY_LABELS[d]}
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.trend_by_day.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Trend (7-day centered moving average)</p>
-					<div class="bg-muted flex h-16 items-end gap-0.5 overflow-x-auto rounded p-1">
-						{#each stats.trend_by_day as p (p.date)}
-							<div
-								class="min-w-1.5 flex-1 rounded-t bg-amber-500"
-								style="height: {Math.max(3, (p.count / maxTrendCount) * 100)}%"
-								title="{p.date} — trend {p.count.toFixed(1)}"
-							></div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.top_peaks_5m.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Peak 5-minute windows</p>
-					<ul class="text-xs">
-						{#each stats.top_peaks_5m as peak (peak.window_start)}
-							<li>{new Date(peak.window_start).toLocaleString()} — {peak.message_count} msgs</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
-
-			<div>
-				<p class="mb-1 text-sm font-medium">First message by hour (UTC, in-range first seen)</p>
-				<div class="flex h-20 items-end gap-0.5">
-					{#each stats.first_message_hours as count, h (h)}
-						<div
-							class="flex-1 rounded-t bg-teal-500"
-							style="height: {Math.max(2, (count / maxFirstHour) * 100)}%"
-							title="{h}:00 — {count}"
-						></div>
-					{/each}
-				</div>
-			</div>
-
-			<div>
-				<p class="mb-1 text-sm font-medium">
-					Top words{#if stats.hapax_ratio != null || stats.zipf_slope != null}
-						<span class="text-muted-foreground font-normal">
-							{#if stats.hapax_ratio != null}
-								· hapax {stats.hapax_ratio}{/if}{#if stats.zipf_slope != null}
-								· Zipf {stats.zipf_slope}{/if}
-						</span>
-					{/if}
-				</p>
-				<div class="space-y-1">
-					{#each stats.top_words as w (w.word)}
-						<div class="flex items-center gap-2 text-xs">
-							<span class="w-24 truncate">{w.word}</span>
-							<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-								<div class="h-full bg-teal-500" style="width: {(w.count / maxWord) * 100}%"></div>
-							</div>
-							<span class="w-12 text-right">{w.count.toLocaleString()}</span>
+								Full stats (JSON)
+							</button>
+							<button
+								type="button"
+								class="hover:bg-accent hover:text-accent-foreground w-full rounded px-2 py-1.5 text-left text-xs"
+								onclick={() =>
+									withStats((s) => {
+										exportTopChattersCsv(
+											s,
+											viewChannelLabel,
+											toRFC3339(fromDate) ?? '',
+											toRFC3339(toDate) ?? ''
+										);
+										exportOpen = false;
+									})}
+							>
+								Top chatters (CSV)
+							</button>
+							<button
+								type="button"
+								class="hover:bg-accent hover:text-accent-foreground w-full rounded px-2 py-1.5 text-left text-xs"
+								onclick={() =>
+									withStats((s) => {
+										exportAllSectionsCsv(
+											s,
+											viewChannelLabel,
+											toRFC3339(fromDate) ?? '',
+											toRFC3339(toDate) ?? ''
+										);
+										exportOpen = false;
+									})}
+							>
+								All sections (CSV)
+							</button>
+							<button
+								type="button"
+								class="hover:bg-accent hover:text-accent-foreground w-full rounded px-2 py-1.5 text-left text-xs"
+								onclick={() => {
+									void handleCopySummary();
+									exportOpen = false;
+								}}
+							>
+								{copiedSummary ? 'Copied!' : 'Copy summary (Markdown)'}
+							</button>
 						</div>
-					{/each}
-				</div>
-			</div>
-
-			{#if stats.top_emotes.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Top emotes</p>
-					<div class="space-y-1">
-						{#each stats.top_emotes as e (e.name)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-24 truncate" title={e.name}>{e.name}</span>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-purple-500"
-										style="width: {(e.count / maxEmote) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{e.count.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.emote_diversity.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Emote diversity (Twitch emotes, 5+ uses)</p>
-					<div class="space-y-1">
-						{#each stats.emote_diversity.slice(0, 5) as d (d.user_id)}
-							<div class="flex items-center gap-2 text-xs">
-								<span
-									class="w-24 truncate"
-									title="{d.unique_emotes} unique / {d.total_emote_uses} uses">{d.username}</span
-								>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-purple-500"
-										style="width: {(d.total_emote_uses / maxDiversity) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{d.diversity_ratio.toFixed(2)}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.top_emote_pairs.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Top emote pairs</p>
-					<div class="space-y-1">
-						{#each stats.top_emote_pairs as p (`${p.emote1}+${p.emote2}`)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-24 truncate">{p.emote1} + {p.emote2}</span>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-purple-500"
-										style="width: {(p.count / maxEmotePair) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{p.count.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.top_commands.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Top commands ({stats.messages_with_commands} msgs)</p>
-					<div class="space-y-1">
-						{#each stats.top_commands as c (c.name)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-24 truncate">!{c.name}</span>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-amber-500"
-										style="width: {(c.count / maxCommand) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{c.count.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.top_domains.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">
-						Top link domains ({stats.messages_with_links} msgs)
-					</p>
-					<div class="space-y-1">
-						{#each stats.top_domains as d (d.domain)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-24 truncate">{d.domain}</span>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-sky-500"
-										style="width: {(d.count / maxDomain) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{d.count.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
-					<p class="text-muted-foreground mt-1 text-xs">
-						Clips {stats.platform_links.twitch_clips} · YouTube {stats.platform_links.youtube} · Discord
-						{stats.platform_links.discord} · X {stats.platform_links.x_twitter} · Kick {stats
-							.platform_links.kick} · Other {stats.platform_links.other}
-					</p>
-				</div>
-			{/if}
-
-			{#if stats.top_mentions.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Top mentions ({stats.messages_with_mentions} msgs)</p>
-					<div class="space-y-1">
-						{#each stats.top_mentions as m (m.username)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-24 truncate">@{m.username}</span>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-emerald-500"
-										style="width: {(m.count / maxMention) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{m.count.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
-					{#if stats.top_mention_pairs.length > 0}
-						<ul class="text-muted-foreground mt-1 space-y-0.5 text-xs">
-							{#each stats.top_mention_pairs.slice(0, 5) as pair (`${pair.from_user}-${pair.to_user}`)}
-								<li>{pair.from_user} → {pair.to_user}: {pair.count}</li>
-							{/each}
-						</ul>
 					{/if}
 				</div>
-			{/if}
-
-			{#if stats.top_repeated_messages.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">
-						Repeated messages ({stats.duplicate_message_count} dupes)
-					</p>
-					<div class="space-y-1">
-						{#each stats.top_repeated_messages.slice(0, 10) as r (r.text)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="flex-1 truncate" title={r.text}>{r.text}</span>
-								<div class="bg-muted h-3 w-24 overflow-hidden rounded">
-									<div
-										class="h-full bg-rose-500"
-										style="width: {(r.count / maxRepeated) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{r.count.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.top_copy_paste_chains.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">
-						Copy-paste chains ({stats.cross_user_copy_paste_count} reposts across {stats.cross_user_copy_paste_texts}
-						texts)
-					</p>
-					<div class="space-y-1">
-						{#each stats.top_copy_paste_chains as c (c.text)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="flex-1 truncate" title={c.text}
-									>{c.text}
-									<span class="text-muted-foreground">· {c.distinct_users} users</span></span
-								>
-								<div class="bg-muted h-3 w-24 overflow-hidden rounded">
-									<div
-										class="h-full bg-rose-500"
-										style="width: {(c.occurrences / maxCopyPaste) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{c.occurrences.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.roles.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Roles</p>
-					<ul class="grid grid-cols-2 gap-1 text-xs">
-						{#each stats.roles as role (role.role)}
-							<li class="bg-muted rounded px-2 py-1">
-								{role.role}: {role.messages.toLocaleString()} msgs · {role.unique_users} users
-							</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
-
-			{#if stats.sessions.total_sessions > 0}
-				<div class="text-xs">
-					<p class="mb-1 text-sm font-medium">Sessions</p>
-					<p class="text-muted-foreground">
-						{stats.sessions.total_sessions} sessions · avg {stats.sessions.avg_messages_per_session?.toFixed(
-							1
-						) ?? '—'} msgs · avg {stats.sessions.avg_session_minutes?.toFixed(1) ?? '—'} min · median
-						{stats.sessions.median_session_minutes?.toFixed(1) ?? '—'} min · p90
-						{stats.sessions.p90_session_minutes?.toFixed(1) ?? '—'} min · longest
-						{stats.sessions.longest_session_minutes?.toFixed(1) ?? '—'} min
-					</p>
-				</div>
-			{/if}
-
-			{#if !isPerUser && stats.concentration.gini_coefficient != null}
-				<div class="text-xs">
-					<p class="mb-1 text-sm font-medium">Concentration</p>
-					<p class="text-muted-foreground">
-						Gini {stats.concentration.gini_coefficient} · top 10% share {stats.concentration
-							.top_10pct_share}%
-					</p>
-				</div>
-			{/if}
-
-			<div class="text-xs">
-				<p class="mb-1 text-sm font-medium">Message classes</p>
-				<p class="text-muted-foreground">
-					? {stats.message_classes.questions} · ! {stats.message_classes.exclamations} · CAPS {stats
-						.message_classes.all_caps} · emote-only {stats.message_classes.emote_only} · short {stats
-						.message_classes.short_messages} · long {stats.message_classes.long_messages}
-				</p>
-				<p class="text-muted-foreground">
-					self-repeats {stats.self_repetition_count}{stats.self_repetition_pct != null
-						? ` (${stats.self_repetition_pct}%)`
-						: ''} · non-ASCII {stats.messages_with_non_ascii}{stats.non_ascii_ratio != null
-						? ` (${(stats.non_ascii_ratio * 100).toFixed(1)}% of chars)`
-						: ''}
-				</p>
 			</div>
 
-			{#if stats.top_phrases.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Top phrases</p>
-					<div class="space-y-1">
-						{#each stats.top_phrases as p (p.phrase)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="flex-1 truncate">{p.phrase}</span>
-								<div class="bg-muted h-3 w-24 overflow-hidden rounded">
-									<div
-										class="h-full bg-teal-500"
-										style="width: {(p.count / maxPhrase) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{p.count.toLocaleString()}</span>
-							</div>
-						{/each}
-					</div>
+			{#if stats && stats.per_channel.length > 0}
+				<div
+					class="bg-card/95 sticky top-0 z-30 -mx-6 mb-4 flex flex-wrap gap-2 border-b px-6 py-2 backdrop-blur"
+				>
+					<button
+						type="button"
+						class="rounded px-3 py-1.5 text-sm font-medium transition-colors {activeChannelTab ===
+						'pooled'
+							? 'bg-primary text-primary-foreground'
+							: 'bg-muted hover:bg-muted/80 text-muted-foreground'}"
+						onclick={() => (activeChannelTab = 'pooled')}
+					>
+						Pooled (All Channels)
+					</button>
+					{#each stats.per_channel as ch (ch.channel)}
+						<button
+							type="button"
+							class="rounded px-3 py-1.5 text-sm font-medium transition-colors {activeChannelTab ===
+							ch.channel
+								? 'bg-primary text-primary-foreground'
+								: 'bg-muted hover:bg-muted/80 text-muted-foreground'}"
+							onclick={() => (activeChannelTab = ch.channel)}
+						>
+							{ch.channel}
+						</button>
+					{/each}
 				</div>
 			{/if}
 
-			{#if stats.anomalies_5m.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Anomalies (5m, z ≥ {anomalySigma})</p>
-					<ul class="text-xs">
-						{#each stats.anomalies_5m.slice(0, 10) as a (a.window_start)}
-							<li>
-								{new Date(a.window_start).toLocaleString()} — {a.message_count} msgs (z {a.z_score},
-								p {a.p_value})
-							</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
-
-			{#if stats.language_breakdown.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Language</p>
-					<ul class="text-xs">
-						{#each stats.language_breakdown as l (l.language)}
-							<li>{l.language}: {l.percentage}%</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
-
-			{#if stats.emote_entropy != null}
-				<div class="text-xs">
-					<p class="mb-1 text-sm font-medium">Emote entropy</p>
-					<p class="text-muted-foreground">{stats.emote_entropy} bits</p>
-				</div>
-			{/if}
-
-			{#if stats.message_length_trend_slope != null}
-				<div class="text-xs">
-					<p class="mb-1 text-sm font-medium">Message length trend</p>
-					<p class="text-muted-foreground">
-						{stats.message_length_trend_slope >= 0 ? '+' : ''}{stats.message_length_trend_slope} chars/day
+			<div class="grid grid-cols-1 gap-x-6 gap-y-5 lg:grid-cols-2">
+				{#if stats.per_channel.length > 0}
+					<p class="text-muted-foreground text-xs lg:col-span-2">
+						Scope:
+						<span class="text-foreground font-medium">
+							{activeChannelTab === 'pooled'
+								? `all ${stats.per_channel.length} channels (pooled)`
+								: activeChannelTab}
+						</span>
 					</p>
-				</div>
-			{/if}
-
-			{#if !isPerUser && stats.lorenz_samples.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Lorenz curve (message share by top %)</p>
-					<ul class="text-xs">
-						{#each stats.lorenz_samples as s (s.top_pct)}
-							<li>top {s.top_pct}% → {s.message_share_pct}% of messages</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
-
-			{#if stats.mention_graph.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Mention graph (in/out degree)</p>
-					<div class="space-y-1">
-						{#each stats.mention_graph as node (node.username)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-24 truncate" title="in {node.mentions_in} / out {node.mentions_out}"
-									>{node.username}</span
-								>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-emerald-500"
-										style="width: {(node.degree / maxMentionDegree) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{node.degree}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if !isPerUser && stats.mutual_mention_pairs.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Mutual mentions</p>
-					<div class="space-y-1">
-						{#each stats.mutual_mention_pairs as p (`${p.user_a}-${p.user_b}`)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-32 truncate" title="{p.user_a} ↔ {p.user_b}"
-									>{p.user_a} ↔ {p.user_b}</span
-								>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-emerald-500"
-										style="width: {(p.total / maxMutualTotal) * 100}%"
-									></div>
-								</div>
-								<span class="w-16 text-right">{p.count_ab}/{p.count_ba}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.emote_centrality.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Emote centrality (distinct co-occurrences)</p>
-					<div class="space-y-1">
-						{#each stats.emote_centrality as c (c.emote)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-24 truncate">{c.emote}</span>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-purple-500"
-										style="width: {(c.distinct_co_occurrences / maxEmoteCentrality) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{c.distinct_co_occurrences}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.bot_likelihood.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Bot likelihood (heuristic)</p>
-					<div class="space-y-1">
-						{#each stats.bot_likelihood as b (b.user_id)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-24 truncate" title={b.signals.join(', ')}>{b.username}</span>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-red-500"
-										style="width: {(b.score / maxBotScore) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{b.score.toFixed(2)}</span>
-								<span class="text-muted-foreground truncate">{b.signals.join(', ')}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if stats.quote_reply_pairs.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">
-						Quote replies ({stats.quote_reply_count} inferred)
+				{:else if nonEmptyChannels.length > 1}
+					<p class="text-muted-foreground text-xs lg:col-span-2">
+						Scope:
+						<span class="text-foreground font-medium">
+							{channelScope === 'all'
+								? `all ${nonEmptyChannels.length} channels (pooled)`
+								: channelScope}
+						</span>
 					</p>
-					<div class="space-y-1">
-						{#each stats.quote_reply_pairs as p (`${p.from_user}-${p.to_user}`)}
-							<div class="flex items-center gap-2 text-xs">
-								<span class="w-32 truncate">{p.from_user} → {p.to_user}</span>
-								<div class="bg-muted h-3 flex-1 overflow-hidden rounded">
-									<div
-										class="h-full bg-teal-500"
-										style="width: {(p.count / maxQuoteReply) * 100}%"
-									></div>
-								</div>
-								<span class="w-12 text-right">{p.count}</span>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
+				{/if}
+				<ResultNav
+					sections={resultSections}
+					stickyTopClass={stats.per_channel.length > 0 ? 'top-11' : 'top-0'}
+				/>
 
-			{#if stats.language_by_day.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Top language per day</p>
-					<ul class="text-xs">
-						{#each stats.language_by_day as d (d.date)}
-							<li>{d.date} — {d.language} ({d.percentage}%)</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
-
-			{#if stats.cohort_retention.length > 0}
-				<div>
-					<p class="mb-1 text-sm font-medium">Weekly cohort retention (%)</p>
-					<div class="overflow-x-auto">
-						<table class="text-[10px]">
-							<thead>
-								<tr class="text-muted-foreground">
-									<th class="pr-2 text-left font-medium">Cohort</th>
-									<th class="pr-2 text-right font-medium">Size</th>
-									{#each Array.from({ length: maxCohortOffset + 1 }, (_, i) => i) as w (w)}
-										<th class="pr-2 text-right font-medium">W{w}</th>
-									{/each}
-								</tr>
-							</thead>
-							<tbody>
-								{#each stats.cohort_retention as row (row.cohort_week)}
-									<tr>
-										<td class="pr-2">{row.cohort_week}</td>
-										<td class="pr-2 text-right">{row.cohort_size}</td>
-										{#each Array.from({ length: maxCohortOffset + 1 }, (_, i) => i) as w (w)}
-											{@const cell = row.retention.find((c) => c.week_offset === w)}
-											<td
-												class="pr-2 text-right"
-												style="opacity: {cell ? 0.3 + 0.7 * (cell.retention_pct / 100) : 0.2}"
-											>
-												{cell ? cell.retention_pct.toFixed(0) : '—'}
-											</td>
-										{/each}
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
-				</div>
-			{/if}
+				<ResultSection id="rs-overview" title="Overview">
+					<OverviewResults
+						stats={displayStats ?? stats}
+						{isPerUser}
+						onDrillUser={drillUser}
+						onDrillChannel={drillChannel}
+					/>
+				</ResultSection>
+				<ResultSection id="rs-activity" title="Activity &amp; Time">
+					<ActivityResults stats={displayStats ?? stats} {anomalySigma} />
+				</ResultSection>
+				<ResultSection id="rs-words" title="Words &amp; Emotes">
+					<WordsEmotesResults
+						stats={displayStats ?? stats}
+						summaries={(displayStats ?? stats).channel_summaries}
+					/>
+				</ResultSection>
+				<ResultSection id="rs-links" title="Links &amp; Commands">
+					<LinksCommandsResults
+						stats={displayStats ?? stats}
+						summaries={(displayStats ?? stats).channel_summaries}
+					/>
+				</ResultSection>
+				<ResultSection id="rs-users" title="User Behavior">
+					<UserBehaviorResults stats={displayStats ?? stats} {isPerUser} />
+				</ResultSection>
+				<ResultSection id="rs-advanced" title="Advanced (Tier 2)" open={false}>
+					<AdvancedResults stats={displayStats ?? stats} {isPerUser} />
+				</ResultSection>
+			</div>
 		{/if}
 	</Content>
 </Card>

@@ -1,102 +1,131 @@
 # AGENTS.md
 
-## Project overview
+Tauri 2 desktop app. Svelte 5 (runes) + shadcn-svelte + Tailwind 4 frontend. Python 3.12
+FastAPI sidecar (PyInstaller onefile), spawned by Rust. The sidecar is the only component that
+talks to the upstream API (harambelogs.pl); the frontend talks HTTP to the sidecar on
+127.0.0.1 with a bearer token.
 
-Tauri 2 desktop app. Frontend: Svelte 5 (runes) + shadcn-svelte + Tailwind.
-Backend: Python 3.12 FastAPI sidecar, bundled with PyInstaller, spawned by Rust.
-Frontend ↔ backend communication is HTTP on 127.0.0.1 with a bearer token.
-Rust is ONLY for process lifecycle and native OS access — do not add business logic there.
+Rust owns process lifecycle only. No business logic there.
+
+## Working norms
+- Read only the files relevant to the task you are doing. Do not load the whole repo map for a small change.
+- After any behavior change, run `bun run test` and fix failures caused by your change before finishing.
+- Behavior changes must ship with a test that fails without the change.
+- If a Pydantic model changes, update the hand-written TS mirror in the same commit.
+- When uncertain about a contract, read the source file listed below rather than guessing.
 
 ## Where things live
+Frontend:
+- `src/lib/api/client.ts` — the ONLY place that calls fetch(). Every request goes through it.
+- `src/lib/api/backend.svelte.ts` — $state store: port, token, status. Owned by App.svelte.
+- `src/lib/views.ts` + `src/lib/components/AppNav.svelte` — view registry. One entry per view.
+- `src/lib/api/chatStats.ts` + `harambelogs.ts` — HAND-WRITTEN mirrors of the Python Pydantic
+  models. Update them by hand when the backend models change.
+- `src/lib/api/export.ts`, `deltas.ts` — client-side helpers, no backend round-trip.
 
-- `src/lib/api/client.ts` — the only place that calls fetch(). Use it.
-- `src/lib/api/backend.svelte.ts` — `$state` store: port, token, status. Call `backend.init()` once.
-- `src/lib/views.ts` + `src/lib/components/AppNav.svelte` — app shell view registry. Adding a view = one entry (id, label, icon, component).
-- `src/lib/api/types.ts` — generated from FastAPI's OpenAPI schema (`bun run gen:types`).
-- `src-python/app/scripts/` — all Python logic. One file per capability.
-- `src-python/app/routers/` — thin HTTP adapters. No logic here.
-- `src-python/app/core/jobs.py` — background job manager for long scripts.
-- `src-tauri/src/sidecar.rs` — spawn/health/shutdown. Rarely needs changes.
+Backend:
+- `src-python/app/scripts/` — one file (or package) per capability. All business logic here.
+- `src-python/app/routers/` — thin HTTP adapters. No logic.
+- `src-python/app/core/jobs.py` — background job manager for scripts over ~2s.
+- `src-python/app/services/harambelogs_client.py` — upstream HTTP client.
+- `src-python/app/services/log_fetch.py` — pagination + upstream quirk handling.
+- `src-python/app/services/log_cache.py` — versioned parquet cache under the app data dir.
+- `src-python/frozen_scripts.py` — registration point for new scripts. See below.
+- `src-python/api_server.spec` — PyInstaller spec (ONEFILE).
 
-## How to add a new Python capability
+Rust:
+- `src-tauri/src/sidecar.rs` — spawn, READY handshake, health, shutdown, diagnostics.
+- `src-tauri/src/commands/default.rs` — read/write for greet.txt/name.txt, path-allowlisted.
 
-1. Create `src-python/app/scripts/<name>.py` with `Params`, `Result` (Pydantic), `NAME`, `DESCRIPTION`, `run()`.
-2. It is auto-registered via `registry.py`. Do not edit routers for this.
-3. Regenerate TS types: start `bun run gen:types:serve` (backend on :8000 with docs enabled), then `bun run gen:types` (pulls `/openapi.json`).
-4. Add a Svelte component that calls `api.runScript("<name>", params)`.
-5. Write a test in `src-python/tests/test_<name>.py`.
+## Adding a Python capability
+Follow these steps in order. Step 2 is the one most often missed and is the #1 way to ship a
+broken release.
+
+1. Create `src-python/app/scripts/<name>.py` (or `<name>/__init__.py`) with `Params`, `Result`
+   (Pydantic), `NAME`, `DESCRIPTION`, `run(params, progress)`. Copy `example_task.py`.
+2. Add the module name to `FROZEN_SCRIPTS` in `src-python/frozen_scripts.py`.
+   Reason: in dev, `registry.py` scans the filesystem and finds the new file anyway; in the
+   packaged app it does not, because PyInstaller puts modules in a PYZ archive where filesystem
+   discovery is unreliable. A missing entry works in `tauri:dev` and silently disappears from
+   the built app.
+3. Add a test in `src-python/tests/test_<name>.py`. The PyInstaller spec derives hidden imports
+   from `FROZEN_SCRIPTS`, so no spec edit is needed.
+4. Frontend: new component calling `api.runScript("<name>", params)`, or `api.createJob(...)`
+   for anything over 2s.
+5. If the result has a rich shape, add a hand-written TS interface next to `chatStats.ts`.
+
+The router, registry, and PyInstaller hidden imports all derive from `FROZEN_SCRIPTS`. Do not
+edit `routers/` for this.
+
+## Auth
+- Rust generates a UUID per launch, passes it to Python via `SIDECAR_TOKEN` env, and exposes it
+  to the frontend via `invoke("get_backend")`.
+- Python checks `Authorization: Bearer <token>` with `compare_digest`. Every route except
+  `/health` requires it.
+- The frontend reads the token from `backend.svelte.ts`. `client.ts` attaches it. No other
+  module touches it.
+- `/openapi.json` is enabled only when `SIDECAR_DEV=1`.
 
 ## Commands
-
-- `bun run tauri:dev` — Tauri dev + Python via uv (hot reload, `SIDECAR_DEV=1`)
-- `bun run tauri:dev:binary` — Tauri dev against the prebuilt PyInstaller binary
-- `bun run build:sidecar` — PyInstaller (onefile) → `src-tauri/binaries/`
-- `bun run build` — sidecar + frontend (`vite build`); `bun run build:app` for the full installer
-- `bun run test:python` — `uv run pytest` in `src-python/`
-- `bun run test:unit` — Vitest; `bun run test:rust` — `cargo test`
-- `bun run check` — svelte-check + tsc; `bun run lint` — prettier + eslint
-
-## Rules / conventions
-
-- Svelte 5 runes only (`$state`, `$derived`, `$props`); no legacy stores or `export let`.
-- Every FastAPI route except `/health` requires `Depends(verify_token)`.
-- Long-running scripts (>2s) must use the jobs API (`POST /api/jobs`) and report `progress()`.
-- Never bind to `0.0.0.0`. Never hardcode the port. Bind `127.0.0.1` only (avoids the Windows Firewall dialog).
-- Keep PyInstaller hidden imports in `api_server.spec`, not in code.
-- shadcn components: `bunx shadcn-svelte@next add <component>`; don't hand-edit `src/lib/components/ui`.
-
-## Svelte AI tools
-
-You are able to use the Svelte MCP server, where you have access to comprehensive Svelte 5 documentation
-(provided project-wide via `@sveltejs/opencode` in `opencode.json`). Use the available tools effectively:
-
-### Available Svelte MCP Tools:
-
-### 1. list-sections
-
-Use this FIRST to discover all available documentation sections. Returns a structured list with titles, use_cases, and paths.
-When asked about Svelte topics, ALWAYS use this tool at the start of the chat to find relevant sections.
-
-### 2. get-documentation
-
-Retrieves full documentation content for specific sections. Accepts single or multiple sections.
-After calling the list-sections tool, you MUST analyze the returned documentation sections (especially the use_cases field) and then use the get-documentation tool to fetch ALL documentation sections that are relevant for the user's task.
-
-### 3. svelte-autofixer
-
-Analyzes Svelte code and returns issues and suggestions.
-You MUST use this tool whenever writing Svelte code before sending it to the user. Keep calling it until no issues or suggestions are returned.
-
-### 4. playground-link
-
-Generates a Svelte Playground link with the provided code.
-After completing the code, ask the user if they want a playground link. Only call this tool after user confirmation and NEVER if code was written to files in their project.
+- `bun run tauri:dev` — dev with uv + hot reload (`SIDECAR_DEV=1`)
+- `bun run tauri:dev:binary` — dev against the prebuilt sidecar
+- `bun run build:sidecar` — PyInstaller onefile → `src-tauri/binaries/api-server-<triple>(.exe)`
+- `bun run test` — check + lint + vitest + cargo test + pytest
+- `bun run build:app` — full installer
 
 ## Gotchas
+PyInstaller / sidecar:
+- ONEFILE is deliberate. Tauri's `externalBin` bundles single files only; onedir's `_internal/`
+  placement breaks in the installer. Do not switch back.
+- Binary name must end with the Rust target triple: `api-server-<triple>[.exe]`.
+- The capability `name` in `src-tauri/capabilities/default.json` must match `externalBin` exactly.
+- `console=True` in the spec is load-bearing. Rust reads `READY <port>` from stdout; anything
+  written to stdout before that line races the handshake.
+- Do not enable UPX. It causes antivirus false positives.
 
-- Sidecar binary name must end with the Rust target triple (`rustc --print host-tuple`).
-- `externalBin: ["binaries/api-server"]` requires `src-tauri/binaries/api-server-<triple>[.exe]`.
-- Capability `name` must match `externalBin` exactly with `"sidecar": true`.
-- Killing the PyInstaller PID doesn't kill the child; use `POST /shutdown` first (see `sidecar.rs`).
-- After changing Python, rerun `build:sidecar` before testing a release build.
-- The Python server must print `READY <port>` with `flush=True`; Rust waits for exactly that line.
-- Sidecar is ONEFILE on purpose: Tauri's `externalBin` bundles single files only,
-  and the onedir bootloader requires `_internal/` next to the exe while Tauri ships
-  `resources/` elsewhere (verified broken: "Failed to load Python DLL"). Do not switch
-  back to onedir without solving the `_internal` placement in the installer.
+Shutdown:
+- `POST /shutdown` is the primary mechanism. Rust kills the process tree as a fallback
+  (`taskkill /T` on Windows; the onefile bootloader's child survives a bare `kill()`).
 
-## Packaging & release
+Cache:
+- `log_cache.py` has `CACHE_VERSION = "v4"`. Bump it whenever the cached parquet schema changes.
+- Cache lives at `<data-dir>/cache/chat_stats/v4/<channel_id_type>_<channel>/YYYY_MM.parquet`.
 
-- Sidecar is built in `--onefile` mode; single exe → `externalBin`, no `_internal/` dir.
-- First launch after install extracts to %TEMP% (2–5s cold start); the UI shows backend status meanwhile.
-- Python must never write next to its executable; use `--data-dir` passed by Rust (`app_data_dir()`).
-- Sign the sidecar exe BEFORE `tauri build` (`scripts/sign-sidecar.{ps1,sh}`).
-  Release CI sets `SIDECAR_PREBUILT=1` so `tauri build` reuses the signed
-  binary instead of rebuilding (and clobbering the signature) via
-  `beforeBuildCommand`; `SIGNING_REQUIRED=1` makes signing failures fatal.
-- Never enable UPX in the PyInstaller spec (AV false positives).
-- Bump version in ONE place: `package.json` → synced to `tauri.conf.json` and `pyproject.toml` by `bun run version`.
-- Release = push tag `vX.Y.Z` → CI builds nsis/msi/dmg/deb/rpm/AppImage + `latest.json`.
-- Always test the built installer on a clean VM before publishing a release (no Python/Rust on the machine).
-- Checklist: app launches, `/health` responds, a script runs, app-data dir is created,
-  closing the window leaves NO `api-server` process, uninstall leaves no orphan process.
+Upstream (harambelogs.pl):
+- Deep offsets are refused around ~30k even when messages exist beyond. `log_fetch.py` detects
+  this via `/stats` and time-splits the span recursively (max depth 8). Do not remove the split.
+- Zero-byte 2xx bodies are transient, not "no data". They are retryable.
+- The upstream is hardcoded in `harambelogs_client.py` (`BASE_URL`) and `main.py`. Not configurable.
+
+Frontend types:
+- `src/lib/api/types.ts` is a placeholder. The types the app actually uses are in `chatStats.ts`
+  and `harambelogs.ts`, maintained by hand.
+
+CI / release:
+- CI: `.github/workflows/test-build.yml`. Clippy is warn-only on purpose: the stable toolchain
+  floats, so new lints must not break unrelated PRs.
+- Release: push tag `vX.Y.Z`. `validate-release` checks 5 version files match the tag.
+  `sync-versions.mjs` updates them (`bun run version`).
+- Signing: the sidecar is signed BEFORE `tauri build`. `SIDECAR_PREBUILT=1` makes the
+  beforeBuildCommand skip the rebuild and preserve the signature.
+
+Version bumping:
+- `bun run version` syncs `package.json` → `tauri.conf.json`, `Cargo.toml` [package],
+  `pyproject.toml`. `Cargo.lock` and `bun.lock` update on the next `cargo check` / `bun install`.
+- `chat_stats` carries its own description version ("v4.5"). Bump the `DESCRIPTION` string when
+  its behavior changes.
+
+## Definition of done
+- Behavior change ships with a test that fails without it. `example_task.py` is the shape to copy.
+- `bun run test` passes.
+- If the sidecar contract changed (spawn, READY, shutdown, packaging), run `bun run build:sidecar`
+  and launch against the rebuilt binary.
+- If a Pydantic model changed, the hand-written TS mirror is updated in the same commit.
+
+## Safety
+- Do not commit secrets. The token is generated at runtime and never stored.
+- Do not run `rm -rf`, `git reset --hard`, `git push --force`, or `DROP TABLE` without explicit
+  confirmation from the user.
+- Do not use `--no-verify`. Fix the failing hook instead.
+- Do not commit binaries or `dist/`.
+- Do not push directly to `main`. Use a feature branch.

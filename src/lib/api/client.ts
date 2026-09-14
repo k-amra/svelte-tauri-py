@@ -161,10 +161,25 @@ export const api = {
 
 		const ctrl = new AbortController();
 		const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+		const started = Date.now();
 
 		// Seed so a UI that starts mid-stream still sees a status object.
 		const seed = await api.getJob(jobId);
 		onProgress?.(seed);
+
+		// Terminal-state polling loop — reused by the clean-end path AND the
+		// stream-failure fallback so a transport blip doesn't fail a job the
+		// server is still running.
+		async function pollUntilTerminal(): Promise<JobStatus> {
+			let last = seed;
+			while (Date.now() - started < timeoutMs) {
+				if (last.status === 'done' || last.status === 'error') return last;
+				await new Promise((r) => setTimeout(r, 1500));
+				last = await api.getJob(jobId);
+				onProgress?.(last);
+			}
+			throw new Error(`job ${jobId} timed out after ${timeoutMs}ms`);
+		}
 
 		try {
 			try {
@@ -186,22 +201,19 @@ export const api = {
 						});
 					}
 				}
+				// Stream ended without a terminal event — poll.
+				return await pollUntilTerminal();
 			} catch (e) {
 				// Timeout abort must keep the old polling contract (Error with
 				// the job id), not leak a DOM AbortError to callers.
 				if (ctrl.signal.aborted) {
 					throw new Error(`job ${jobId} timed out after ${timeoutMs}ms`, { cause: e });
 				}
-				throw new Error(
-					`job ${jobId} stream failed: ${e instanceof Error ? e.message : String(e)}`,
-					{
-						cause: e
-					}
-				);
+				// Transport error: fall back to polling. The server may still be
+				// running the job; a broken SSE stream is not a job failure.
+				console.warn(`[api] SSE stream for job ${jobId} broke — falling back to polling:`, e);
+				return await pollUntilTerminal();
 			}
-			// Stream ended without a terminal event; fall through to a
-			// final poll so a lost terminal frame isn't fatal.
-			return await api.getJob(jobId);
 		} finally {
 			clearTimeout(timer);
 		}

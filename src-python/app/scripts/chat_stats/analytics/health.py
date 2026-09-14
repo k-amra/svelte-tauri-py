@@ -53,6 +53,68 @@ def compute_roles(df: pl.DataFrame) -> dict:
     }
 
 
+_STAFF_ROLES = ("broadcaster", "moderator", "vip")
+_SUBSCRIBER_ROLES = ("subscriber",)
+
+
+def _compute_role_roster(df: pl.DataFrame, roles: tuple[str, ...]) -> list[dict]:
+    """Shared implementation: one row per user ever seen with one of `roles`.
+
+    messageCount covers ALL of that user's messages in range (not just the
+    ones where the badge was present). Role is the chronologically last role
+    the user held among `roles` (frame is sorted by ts, so `.last()` over the
+    filtered frame is correct).
+    """
+    if df.height == 0 or "role" not in df.columns:
+        return []
+
+    counts = df.group_by("user_id").agg(
+        pl.col("username").last().alias("username"),
+        pl.col("ts").min().alias("firstSeen"),
+        pl.col("ts").max().alias("lastSeen"),
+        pl.len().alias("totalMessages"),
+    )
+    roles_observed = (
+        df.filter(pl.col("role").is_in(roles))
+        .group_by("user_id")
+        .agg(pl.col("role").last().alias("role"))
+    )
+    grouped = counts.join(roles_observed, on="user_id", how="inner").sort(
+        ["role", "totalMessages", "user_id"],
+        descending=[False, True, False],
+    )
+    return [
+        {
+            "user_id": r["user_id"],
+            "username": r["username"],
+            "role": r["role"],
+            "messageCount": int(r["totalMessages"]),
+            "firstSeen": r["firstSeen"].isoformat() if r["firstSeen"] else None,
+            "lastSeen": r["lastSeen"].isoformat() if r["lastSeen"] else None,
+        }
+        for r in grouped.iter_rows(named=True)
+    ]
+
+
+def compute_staff_list(df: pl.DataFrame) -> dict:
+    """Per-user list of broadcaster, moderators, and VIPs (see `_compute_role_roster`).
+
+    Staff who sent zero messages in the range cannot appear: roles are only
+    observable on messages, and upstream exposes no channel roster.
+    """
+    return {"staff_list": _compute_role_roster(df, _STAFF_ROLES)}
+
+
+def compute_subscriber_list(df: pl.DataFrame, top_n: int = 200) -> dict:
+    """Per-user list of subscribers, capped at `top_n`.
+
+    Returns `subscriber_count` (the true distinct-subscriber count, which the
+    UI can display even when the list is truncated) alongside the capped list.
+    """
+    rows = _compute_role_roster(df, _SUBSCRIBER_ROLES)
+    return {"subscriber_list": rows[:top_n], "subscriber_count": len(rows)}
+
+
 def compute_self_repetition(df: pl.DataFrame) -> dict:
     """Same user sending the identical text twice in a row (per-user sequence)."""
     if df.height < 2:

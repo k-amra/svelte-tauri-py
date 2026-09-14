@@ -1,9 +1,9 @@
 {
 	"extends": ["config:recommended", "group:all", "schedule:weekly", ":widenPeerDependencies"],
-	"enabledManagers": ["cargo", "github-actions", "npm"],
+	"enabledManagers": ["cargo", "github-actions", "npm", "pep621", "pip_requirements"],
 	"packageRules": [
 		{
-			"matchManagers": ["cargo"],
+			"matchManagers": ["cargo", "pep621", "pip_requirements"],
 			"matchUpdateTypes": ["minor", "patch"],
 			"automerge": true,
 			"minimumReleaseAge": "2 days"

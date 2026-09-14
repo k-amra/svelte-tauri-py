@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { backend } from '$lib/api/backend.svelte';
+	import { theme } from '$lib/theme.svelte';
 	import AppNav from '$lib/components/AppNav.svelte';
 	import { DEFAULT_VIEW, views } from '$lib/views';
 
 	// App owns the global backend lifecycle (init once, dispose on unmount).
 	onMount(() => {
+		theme.init();
 		void backend.init();
 		return () => {
 			void backend.dispose();

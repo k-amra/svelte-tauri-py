@@ -13,6 +13,12 @@ export interface TopChatterStat {
 	firstSeen: string | null;
 	lastSeen: string | null;
 	engagement_score: number | null;
+	/**
+	 * Channels this user appeared in. Only populated for pooled multi-channel
+	 * runs; single-channel runs leave it empty. The frontend renders a badge
+	 * from this list when viewing the pooled result.
+	 */
+	channels?: string[];
 }
 
 export interface DayCount {
@@ -86,6 +92,90 @@ export interface RoleCount {
 	role: string;
 	messages: number;
 	unique_users: number;
+}
+
+export interface ChatterDelta {
+	user_id: string;
+	username: string;
+	current: number;
+	previous: number;
+	delta: number;
+}
+
+export interface ChannelSummary {
+	channel: string;
+	total_messages: number;
+	unique_chatters: number;
+	top_chatters: TopChatterStat[];
+	top_emotes: EmoteCount[];
+	top_words: WordCount[];
+	top_commands: CommandCount[];
+	top_domains: DomainCount[];
+	top_mentions: MentionCount[];
+	roles: RoleCount[];
+	peak_concurrent_chatters: number | null;
+	messages_per_day: DayCount[];
+	first_message: string | null;
+	last_message: string | null;
+}
+
+export type ComparisonMode =
+	'previous_period' | 'previous_week' | 'previous_month' | 'previous_year' | 'custom';
+
+/** Human label for the comparison mode, used in captions ("vs previous week"). */
+export function comparisonModeLabel(mode: ComparisonMode): string {
+	switch (mode) {
+		case 'previous_week':
+			return 'vs previous week';
+		case 'previous_month':
+			return 'vs previous month';
+		case 'previous_year':
+			return 'vs previous year';
+		case 'custom':
+			return 'vs custom range';
+		default:
+			return 'vs previous period';
+	}
+}
+
+export interface PreviousPeriod {
+	from_date: string;
+	to_date: string;
+	// Headline scalars
+	total_messages: number;
+	unique_chatters: number;
+	avg_message_length: number;
+	median_message_length: number | null;
+	max_message_length: number | null;
+	avg_words_per_message: number | null;
+	vocab_richness: number | null;
+	unique_word_count: number;
+	peak_concurrent_chatters: number | null;
+	// Composition
+	roles: Record<string, number>;
+	message_classes: Record<string, number>;
+	platform_links: Record<string, number>;
+	self_repetition_count: number;
+	duplicate_message_count: number;
+	non_ascii_ratio: number | null;
+	cross_user_copy_paste_count: number;
+	// Top movers
+	top_chatter_gainers: ChatterDelta[];
+	top_chatter_losers: ChatterDelta[];
+	// Time-series, aligned by index to the current window
+	messages_per_day: DayCount[];
+	activity_by_hour: number[];
+	/** Which window the backend resolved. Drives the caption in the UI. */
+	mode: ComparisonMode;
+}
+
+export interface StaffMember {
+	user_id: string;
+	username: string;
+	role: string;
+	messageCount: number;
+	firstSeen: string | null;
+	lastSeen: string | null;
 }
 
 export interface SessionStats {
@@ -248,6 +338,9 @@ export interface ChatStatsResult {
 	top_repeated_messages: RepeatedMessage[];
 
 	roles: RoleCount[];
+	staff_list: StaffMember[];
+	subscriber_list: StaffMember[];
+	subscriber_count: number;
 	sessions: SessionStats;
 	concentration: Concentration;
 	message_classes: MessageClassStats;
@@ -293,11 +386,22 @@ export interface ChatStatsResult {
 	weekly_seasonality: number[] | null;
 	quote_reply_count: number;
 	quote_reply_pairs: QuoteReplyPair[];
+	previous_period: PreviousPeriod | null;
+	channel_summaries: ChannelSummary[];
+	per_channel: ChannelStatsResult[];
 	warnings: string[];
 }
 
-export interface ChatStatsParams {
+/** Full isolated stats for one channel within a multi-channel run. */
+export interface ChannelStatsResult extends ChatStatsResult {
 	channel: string;
+}
+
+export interface ChatStatsParams {
+	/** Deprecated: use `channels`. Kept for backwards compat. */
+	channel?: string;
+	/** One or more channels (up to 3); multi-channel runs pool their messages. */
+	channels?: string[];
 	channel_id_type: 'channel' | 'channelid';
 	/** Optional single-user filter. Omit or leave undefined for whole-channel. */
 	user?: string;
@@ -335,6 +439,12 @@ export interface ChatStatsParams {
 	include_cohort_retention?: boolean;
 	include_language_by_day?: boolean;
 	include_quote_replies?: boolean;
+	include_staff_list?: boolean;
+	include_subscriber_list?: boolean;
+	compare_previous?: boolean;
+	comparison_mode?: ComparisonMode;
+	compare_from_date?: string;
+	compare_to_date?: string;
 	session_gap_minutes: number;
 	anomaly_sigma: number;
 	force_refresh: boolean;

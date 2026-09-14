@@ -53,6 +53,13 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Must run before fmt/clippy: those compile webkit2gtk sys-crates,
+      # which need the system libs present or the build fails on pkg-config.
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
       - name: Rust format check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
@@ -61,11 +68,6 @@ jobs:
       # editor-side nudge via rust-analyzer settings.
       - name: Rust clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
-
-      - name: install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Type check (svelte-check + tsc)
         run: bun run check

@@ -36,14 +36,20 @@ def compute_overview(df: pl.DataFrame) -> dict:
 
 
 def compute_users(df: pl.DataFrame, top_n: int, include_engagement: bool) -> dict:
-    u = df.group_by("user_id").agg(
+    has_channel = "channel" in df.columns
+
+    aggs = [
         pl.len().alias("messageCount"),
         pl.col("username").last().alias("username"),
         pl.col("ts").min().alias("firstSeen"),
         pl.col("ts").max().alias("lastSeen"),
         pl.col("ts").dt.date().n_unique().alias("activeDays"),
         pl.col("text").str.len_chars().mean().alias("avg_msg_len"),
-    )
+    ]
+    if has_channel:
+        aggs.append(pl.col("channel").unique().alias("channels"))
+
+    u = df.group_by("user_id").agg(*aggs)
 
     # Engagement score normalized against the *full* user frame so changing
     # top_n does not rescale every score.
@@ -78,17 +84,19 @@ def compute_users(df: pl.DataFrame, top_n: int, include_engagement: bool) -> dic
     top_chatters = []
     for r in top.iter_rows(named=True):
         score = r["engagement_score"]
-        top_chatters.append(
-            {
-                "user_id": r["user_id"],
-                "username": r["username"],
-                "messageCount": int(r["messageCount"]),
-                "activeDays": int(r["activeDays"]),
-                "firstSeen": r["firstSeen"].isoformat() if r["firstSeen"] else None,
-                "lastSeen": r["lastSeen"].isoformat() if r["lastSeen"] else None,
-                "engagement_score": round(float(score), 4) if score is not None else None,
-            }
-        )
+        entry: dict = {
+            "user_id": r["user_id"],
+            "username": r["username"],
+            "messageCount": int(r["messageCount"]),
+            "activeDays": int(r["activeDays"]),
+            "firstSeen": r["firstSeen"].isoformat() if r["firstSeen"] else None,
+            "lastSeen": r["lastSeen"].isoformat() if r["lastSeen"] else None,
+            "engagement_score": round(float(score), 4) if score is not None else None,
+        }
+        if has_channel:
+            # Polars returns `None` for empty groups; normalize to a list.
+            entry["channels"] = sorted(r.get("channels") or [])
+        top_chatters.append(entry)
     return {"top_chatters": top_chatters}
 
 
