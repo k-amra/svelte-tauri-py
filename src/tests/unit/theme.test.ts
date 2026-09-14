@@ -87,6 +87,15 @@ describe('theme store', () => {
 		expect(document.documentElement.classList.contains('dark')).toBe(true);
 	});
 
+	it('cycle() works when destructured (no `this` binding)', async () => {
+		const { theme } = await loadStore();
+		theme.init();
+		theme.set('light');
+		const { cycle } = theme;
+		expect(() => cycle()).not.toThrow();
+		expect(theme.value).toBe('dark');
+	});
+
 	it('ignores invalid stored values', async () => {
 		localStorage.setItem('theme', 'neon');
 		const { theme } = await loadStore();

@@ -29,6 +29,13 @@ function attachMediaListener(): void {
 	mediaQuery.addEventListener('change', mediaListener);
 }
 
+function setTheme(next: Theme): void {
+	current = next;
+	if (typeof window !== 'undefined') window.localStorage.setItem(STORAGE_KEY, next);
+	attachMediaListener();
+	apply();
+}
+
 export const theme = {
 	get value(): Theme {
 		return current;
@@ -45,14 +52,9 @@ export const theme = {
 		attachMediaListener();
 		apply();
 	},
-	set(next: Theme): void {
-		current = next;
-		if (typeof window !== 'undefined') window.localStorage.setItem(STORAGE_KEY, next);
-		attachMediaListener();
-		apply();
-	},
+	set: setTheme,
 	/** Cycle light → dark → system → light. */
 	cycle(): void {
-		this.set(current === 'light' ? 'dark' : current === 'dark' ? 'system' : 'light');
+		setTheme(current === 'light' ? 'dark' : current === 'dark' ? 'system' : 'light');
 	}
 };
