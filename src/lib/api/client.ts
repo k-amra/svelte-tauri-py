@@ -49,11 +49,18 @@ async function apiFetch(path: string, init: RequestInit = {}, skipAuth = false) 
 		);
 	}
 
-	const responsePreview = await res
-		.clone()
-		.text()
-		.then((text) => text || undefined)
-		.catch(() => undefined);
+	// Only capture small responses for the debug log. Cloning a large body
+	// (e.g. 50k log lines) doubles peak memory for a purely diagnostic view.
+	// Chunked responses (no Content-Length) are skipped conservatively.
+	const contentLength = Number(res.headers.get('content-length') || '0');
+	let responsePreview: string | undefined;
+	if (contentLength > 0 && contentLength < 65536) {
+		responsePreview = await res
+			.clone()
+			.text()
+			.then((text) => text || undefined)
+			.catch(() => undefined);
+	}
 	apiDebug.add({ direction: 'in', method, url, status: res.status, payload: responsePreview });
 
 	if (!res.ok) {
@@ -177,6 +184,12 @@ export const api = {
 		// Seed so a UI that starts mid-stream still sees a status object.
 		const seed = await api.getJob(jobId);
 		onProgress?.(seed);
+		// Short jobs (or `example_task`-style sync runs) may already be
+		// terminal — skip the SSE round-trip entirely. The outer `finally`
+		// still clears the timeout.
+		if (seed.status === 'done' || seed.status === 'error') {
+			return seed;
+		}
 
 		// Terminal-state polling loop — reused by the clean-end path AND the
 		// stream-failure fallback so a transport blip doesn't fail a job the

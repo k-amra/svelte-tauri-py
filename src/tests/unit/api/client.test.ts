@@ -122,6 +122,55 @@ describe('api client', () => {
 		expect(seen).toEqual(['0:', '10:ten']);
 	});
 
+	it('waitJob() returns the seed directly when already terminal', async () => {
+		const done = jobStatus({ status: 'done', progress: 100, message: 'done' });
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(done), { status: 200 }));
+		const { api } = await import('$lib/api/client');
+		const seen: string[] = [];
+		const result = await api.waitJob('abc123', (j) => seen.push(j.status));
+		expect(result).toEqual(done);
+		expect(seen).toEqual(['done']);
+		// Seed only — no SSE round-trip.
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('apiFetch() skips the debug preview for large bodies', async () => {
+		const big = 'x'.repeat(70_000);
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		fetchSpy.mockResolvedValueOnce(
+			new Response(JSON.stringify({ status: big }), {
+				status: 200,
+				headers: { 'content-length': String(70_010) }
+			})
+		);
+		const { api } = await import('$lib/api/client');
+		const { apiDebug } = await import('$lib/api/debug.svelte');
+		const add = vi.mocked(apiDebug.add);
+		add.mockClear();
+		const res = await api.health();
+		expect(res.status).toBe(big);
+		const inbound = add.mock.calls.find((c) => c[0].direction === 'in');
+		expect(inbound?.[0].payload).toBeUndefined();
+	});
+
+	it('apiFetch() still previews small bodies', async () => {
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		fetchSpy.mockResolvedValueOnce(
+			new Response(JSON.stringify({ status: 'ok' }), {
+				status: 200,
+				headers: { 'content-length': '15' }
+			})
+		);
+		const { api } = await import('$lib/api/client');
+		const { apiDebug } = await import('$lib/api/debug.svelte');
+		const add = vi.mocked(apiDebug.add);
+		add.mockClear();
+		await api.health();
+		const inbound = add.mock.calls.find((c) => c[0].direction === 'in');
+		expect(inbound?.[0].payload).toContain('ok');
+	});
+
 	it('waitJob() keeps the timeout contract on abort', async () => {
 		// A stream that pends forever, errored by the abort signal —
 		// emulating what a real fetch does when its signal fires mid-read.
