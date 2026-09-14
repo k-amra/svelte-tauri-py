@@ -30,7 +30,6 @@ const outPath = resolve(argValue('--out') ?? join(root, 'consolidated.txt'));
 // all descendants), regardless of depth.
 const SKIP_DIRS = new Set([
 	'.git',
-	'.github', // keep? we DO want workflows; see KEEP_DIRS below
 	'node_modules',
 	'.svelte-kit',
 	'.vite',
@@ -53,8 +52,9 @@ const SKIP_DIRS = new Set([
 	'.vscode-test'
 ]);
 
-// We want .github/workflows in the snapshot (as the earlier one had it), so
-// undo the blanket .github exclusion above by listing it in KEEP_DIRS.
+// `.github` is deliberately NOT in SKIP_DIRS: workflows and renovate.json
+// belong in the snapshot. KEEP_DIRS exists for future dirs that need the
+// same carve-out.
 const KEEP_DIRS = new Set(['.github']);
 
 // File names: exact basename matches are skipped anywhere in the tree.
