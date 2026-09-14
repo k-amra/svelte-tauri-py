@@ -77,6 +77,18 @@ fn kill_process_tree(_pid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+fn sidecar_alive(app: &AppHandle) -> bool {
+    app.try_state::<SidecarChild>()
+        .map(|s| s.0.lock().unwrap_or_else(|e| e.into_inner()).is_some())
+        .unwrap_or(false)
+}
+
+fn dev_child_alive(app: &AppHandle) -> bool {
+    app.try_state::<DevChild>()
+        .map(|s| s.0.lock().unwrap_or_else(|e| e.into_inner()).is_some())
+        .unwrap_or(false)
+}
+
 /// Minimal blocking GET http://127.0.0.1:port/health (no extra deps).
 fn health_ok(port: u16) -> bool {
     let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
@@ -405,6 +417,10 @@ fn spawn_bundled(app: &AppHandle, token: &str, data_dir: &str) {
                     if let Some(state) = handle.try_state::<BackendState>() {
                         *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     }
+                    // Clear the handle so shutdown() cannot taskkill a recycled PID.
+                    if let Some(state) = handle.try_state::<SidecarChild>() {
+                        *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    }
                     let _ = handle.emit("backend-gone", ());
                     return;
                 }
@@ -450,49 +466,60 @@ pub fn shutdown(app: &AppHandle) {
     if let Some((port, token)) = backend {
         post_shutdown(port, &token);
     }
-    // Give it a beat to exit cleanly, then fallback to a process-tree kill.
+    // Poll for graceful exit up to 3s. Force-killing a PyInstaller onefile
+    // bootloader before it finishes cleanup orphans its %TEMP%\_MEIxxxxxx
+    // extraction dir AND its real Python child (which holds the port).
     // On Windows the HTTP shutdown can fail (firewall, hung worker thread,
     // rejected token), and killing only the bootloader would orphan the real
     // Python process holding the port + cache lock.
-    std::thread::sleep(Duration::from_millis(400));
+    let deadline = Instant::now() + Duration::from_millis(3000);
+    while Instant::now() < deadline && (sidecar_alive(app) || dev_child_alive(app)) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
-    if let Some(child_state) = app.try_state::<SidecarChild>() {
-        if let Some(child) = child_state
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            let pid = child.pid();
-            #[cfg(windows)]
+    if sidecar_alive(app) {
+        if let Some(child_state) = app.try_state::<SidecarChild>() {
+            if let Some(child) = child_state
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
             {
-                match kill_process_tree(pid) {
-                    Ok(()) => log::info!("sidecar process tree {pid} killed via taskkill /T"),
-                    Err(e) => {
-                        log::warn!("taskkill /T {pid} failed: {e}; falling back to child.kill()");
-                        let _ = child.kill();
+                let pid = child.pid();
+                #[cfg(windows)]
+                {
+                    match kill_process_tree(pid) {
+                        Ok(()) => log::info!("sidecar process tree {pid} killed via taskkill /T"),
+                        Err(e) => {
+                            log::warn!(
+                                "taskkill /T {pid} failed: {e}; falling back to child.kill()"
+                            );
+                            let _ = child.kill();
+                        }
                     }
                 }
-            }
-            #[cfg(not(windows))]
-            {
-                // kill_process_tree is a no-op on non-Windows; kill directly.
-                let _ = child.kill();
+                #[cfg(not(windows))]
+                {
+                    // kill_process_tree is a no-op on non-Windows; kill directly.
+                    let _ = child.kill();
+                }
             }
         }
     }
 
     // Dev-mode sidecar (std::process::Child): same reasoning.
-    if let Some(dev_state) = app.try_state::<DevChild>() {
-        if let Some(mut child) = dev_state.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let pid = child.id();
-            #[cfg(windows)]
-            if kill_process_tree(pid).is_err() {
+    if dev_child_alive(app) {
+        if let Some(dev_state) = app.try_state::<DevChild>() {
+            if let Some(mut child) = dev_state.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let pid = child.id();
+                #[cfg(windows)]
+                if kill_process_tree(pid).is_err() {
+                    let _ = child.kill();
+                }
+                #[cfg(not(windows))]
                 let _ = child.kill();
+                let _ = child.wait(); // reap
             }
-            #[cfg(not(windows))]
-            let _ = child.kill();
-            let _ = child.wait(); // reap
         }
     }
 }
