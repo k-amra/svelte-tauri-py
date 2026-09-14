@@ -3,7 +3,18 @@
 # Requires Developer ID cert + hardened runtime, otherwise notarization fails.
 # Usage: IDENTITY="Developer ID Application: ..." scripts/sign-sidecar.sh
 set -euo pipefail
-TRIPLE="${1:-$(rustc --print host-tuple)}"
+
+# Mirror build-sidecar.mjs: `--print host-tuple` requires Rust >= 1.84; parse
+# `rustc -Vv` for older toolchains (Cargo.toml allows 1.77.2).
+detect_triple() {
+  if rustc --print host-tuple >/dev/null 2>&1; then
+    rustc --print host-tuple
+  else
+    rustc -Vv | sed -n 's/^host: //p'
+  fi
+}
+
+TRIPLE="${1:-$(detect_triple)}"
 EXE="src-tauri/binaries/api-server-${TRIPLE}"
 if [[ ! -f "$EXE" ]]; then echo "Missing $EXE — run build:sidecar first" >&2; exit 1; fi
 if [[ -z "${IDENTITY:-}" ]]; then
