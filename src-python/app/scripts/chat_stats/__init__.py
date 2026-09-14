@@ -333,14 +333,23 @@ async def _run_both_with_api(
         progress(90.0, "computing full per-channel stats")
         per_channel_results: list[ChannelResult] = []
         has_channel_col = "channel" in df.columns
+
+        # Single O(N) pass; the previous per-channel df.filter() was O(N·M).
+        # Keys from partition_by are 1-tuples when partitioning by one column.
+        channel_frames: dict[str, pl.DataFrame] = {}
+        if has_channel_col:
+            for key, sub in df.partition_by("channel", as_dict=True).items():
+                name = key[0] if isinstance(key, tuple) else key
+                channel_frames[name] = sub
+
         for i, ch in enumerate(params.channels):
-            ch_df = df.filter(pl.col("channel") == ch) if has_channel_col else df.clear()
+            ch_df = channel_frames.get(ch) if has_channel_col else None
             ch_params = params.model_copy(
                 update={"channels": [ch], "channel": ch, "compare_previous": False}
             )
             ch_emote_map = emote_maps[i] if i < len(emote_maps) else {}
 
-            if ch_df.is_empty():
+            if ch_df is None or ch_df.is_empty():
                 ch_stats = Result(
                     total_messages=0,
                     unique_chatters=0,
