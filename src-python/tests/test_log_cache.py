@@ -131,6 +131,31 @@ def test_eviction_throttled_within_interval(monkeypatch):
     assert len(calls) == 2
 
 
+def test_version_sweep_runs_once_per_process(monkeypatch, tmp_path):
+    """The stale-version rmtree sweep must not repeat on every _dir() call."""
+    import shutil as shutil_module
+
+    monkeypatch.setattr(log_cache, "_cleaned_versions", False)
+    calls: list = []
+    orig_rmtree = shutil_module.rmtree
+
+    def spy(*args, **kwargs):
+        calls.append(args[0])
+        return orig_rmtree(*args, **kwargs)
+
+    monkeypatch.setattr(shutil_module, "rmtree", spy)
+    from app.core import paths as paths_module
+
+    root = paths_module.cache_root() / "chat_stats"
+    (root / "v0").mkdir(parents=True)
+    log_cache._dir()
+    assert len(calls) == 1
+    # A stale dir appearing later in the process must not trigger a resweep.
+    (root / "v0").mkdir(parents=True, exist_ok=True)
+    log_cache._dir()
+    assert len(calls) == 1
+
+
 def test_save_month_uses_unique_tmp_paths(monkeypatch):
     """Concurrent saves to one month must not share a tmp path (WinError 32)."""
     seen: list[str] = []

@@ -64,17 +64,24 @@ EVICT_MIN_INTERVAL_S = 60 * 60
 _last_evict_ts: float = 0.0
 
 
+_cleaned_versions: bool = False
+
+
 def _dir() -> Path:
+    global _cleaned_versions
     root = paths.cache_root() / "chat_stats"
     root.mkdir(parents=True, exist_ok=True)
     d = root / CACHE_VERSION
     d.mkdir(parents=True, exist_ok=True)
     # Drop caches written by older app versions (different frame schema):
     # without this each version could hoard up to MAX_CACHE_BYTES forever.
-    for child in root.iterdir():
-        if child.is_dir() and child.name != CACHE_VERSION:
-            shutil.rmtree(child, ignore_errors=True)
-            log.info("cache cleanup: removed outdated version dir %s", child.name)
+    # One sweep per process is enough; this runs on every load/save.
+    if not _cleaned_versions:
+        _cleaned_versions = True
+        for child in root.iterdir():
+            if child.is_dir() and child.name != CACHE_VERSION:
+                shutil.rmtree(child, ignore_errors=True)
+                log.info("cache cleanup: removed outdated version dir %s", child.name)
     return d
 
 
