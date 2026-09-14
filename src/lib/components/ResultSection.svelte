@@ -15,9 +15,20 @@
 		open?: boolean;
 		children: Snippet;
 	} = $props();
+
+	// Local mirror of the browser's toggle state. `bind:open` writes the
+	// user's clicks here, and this local survives parent re-renders that
+	// would otherwise reset the attribute back to the `open` prop.
+	// Snapshotting the initial prop value is intentional here.
+	// svelte-ignore state_referenced_locally
+	let isOpen = $state(open);
 </script>
 
-<details {id} {open} class="border-border/60 group scroll-mt-20 rounded-md border lg:col-span-2">
+<details
+	{id}
+	bind:open={isOpen}
+	class="border-border/60 group scroll-mt-20 rounded-md border lg:col-span-2"
+>
 	<summary
 		class="hover:bg-muted/50 flex cursor-pointer items-center justify-between rounded-md px-4 py-2.5"
 	>
