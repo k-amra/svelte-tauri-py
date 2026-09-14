@@ -40,6 +40,8 @@ jobs:
         with:
           # Must match `packageManager` in package.json (lockfile stability).
           bun-version: '1.4.2'
+          # Restores ~/.bun/install/cache keyed on bun.lock.
+          cache: true
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
@@ -52,6 +54,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          # fmt/clippy/test share a target dir; caching saves ~3-5 min per PR.
 
       # Must run before fmt/clippy: those compile webkit2gtk sys-crates,
       # which need the system libs present or the build fails on pkg-config.
