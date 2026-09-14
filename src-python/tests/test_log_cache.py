@@ -129,3 +129,24 @@ def test_eviction_throttled_within_interval(monkeypatch):
     monkeypatch.setattr(log_cache, "_last_evict_ts", 0.0)
     log_cache.save_month("channel", "c", 2024, 1, _frame(), _meta())
     assert len(calls) == 2
+
+
+def test_save_month_uses_unique_tmp_paths(monkeypatch):
+    """Concurrent saves to one month must not share a tmp path (WinError 32)."""
+    seen: list[str] = []
+    orig = pl.DataFrame.write_parquet
+
+    def spy(self, path, *args, **kwargs):
+        seen.append(str(path))
+        return orig(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", spy)
+    log_cache.save_month("channel", "x", 2024, 1, _frame(), _meta())
+    log_cache.save_month("channel", "x", 2024, 1, _frame(), _meta())
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert seen[0].endswith(".parquet.tmp") and seen[1].endswith(".parquet.tmp")
+    # No tmp leftovers, and the final files load.
+    channel_dir = log_cache.get_month_paths("channel", "x", 2024, 1)[0].parent
+    assert list(channel_dir.glob("*.tmp")) == []
+    assert log_cache.load_month("channel", "x", 2024, 1) is not None

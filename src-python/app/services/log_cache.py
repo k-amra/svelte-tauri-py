@@ -39,6 +39,7 @@ import logging
 import os
 import shutil
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -209,8 +210,12 @@ def save_month(
 ) -> None:
     """Atomic write (tmp + rename) so half-written files never load."""
     parquet_path, meta_path = get_month_paths(channel_id_type, channel, year, month)
-    tmp_pq = parquet_path.with_suffix(".parquet.tmp")
-    tmp_meta = meta_path.with_suffix(".json.tmp")
+    # Unique suffix per writer: two concurrent saves to the same month would
+    # otherwise share one tmp path and (on Windows) raise WinError 32, or
+    # (on POSIX) interleave writes into a corrupt Parquet footer.
+    tmp_id = uuid.uuid4().hex[:8]
+    tmp_pq = parquet_path.with_suffix(f".{tmp_id}.parquet.tmp")
+    tmp_meta = meta_path.with_suffix(f".{tmp_id}.json.tmp")
     try:
         df.write_parquet(tmp_pq)
         tmp_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")
