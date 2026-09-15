@@ -86,7 +86,7 @@ def compute_channel_summary(
     commands_result = compute_commands(sub, PER_CHANNEL_LIST_SIZE)
     top_commands = [CommandCount(**c) for c in commands_result["top_commands"]]
 
-    links_result = compute_links(sub, PER_CHANNEL_LIST_SIZE)
+    links_result = compute_links(sub, PER_CHANNEL_LIST_SIZE, all_urls_limit=0)
     top_domains = [DomainCount(**d) for d in links_result["top_domains"]]
 
     mentions_result = compute_mentions(sub, PER_CHANNEL_LIST_SIZE, mention_pairs_frame(sub))

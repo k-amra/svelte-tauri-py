@@ -193,7 +193,7 @@ async def _compute_previous_period(
     roles_map = {r["role"]: r["messages"] for r in roles}
 
     classes = compute_message_classes(df, twitch_emotes, emote_map)["message_classes"]
-    platform_links = compute_links(df, top_n=0)["platform_links"]
+    platform_links = compute_links(df, top_n=0, all_urls_limit=0)["platform_links"]
     health = compute_health(df, top_n=0)
     self_rep = compute_self_repetition(df)
     non_ascii = compute_non_ascii(df)

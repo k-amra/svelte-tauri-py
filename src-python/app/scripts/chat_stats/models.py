@@ -195,6 +195,11 @@ class DomainCount(BaseModel):
     count: int
 
 
+class UrlCount(BaseModel):
+    url: str
+    count: int
+
+
 class MentionCount(BaseModel):
     username: str
     count: int
@@ -476,6 +481,14 @@ class Result(BaseModel):
 
     messages_with_links: int = 0
     top_domains: list[DomainCount] = []
+    # Full URLs ranked by occurrence count (see analytics/links.compute_links).
+    # Bounded by Params.top_n so payload stays small even for link-heavy ranges.
+    top_urls: list[UrlCount] = []
+    # Full ranked URL list for the "show all" dialog (capped at
+    # links.MAX_ALL_URLS to bound payload). `unique_url_count` is the true
+    # distinct count, so the UI can flag when the cap was hit.
+    all_urls: list[UrlCount] = []
+    unique_url_count: int = 0
     platform_links: PlatformLinks = Field(default_factory=PlatformLinks)
 
     messages_with_mentions: int = 0

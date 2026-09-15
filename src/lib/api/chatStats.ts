@@ -72,6 +72,11 @@ export interface DomainCount {
 	count: number;
 }
 
+export interface UrlCount {
+	url: string;
+	count: number;
+}
+
 export interface MentionCount {
 	username: string;
 	count: number;
@@ -328,6 +333,11 @@ export interface ChatStatsResult {
 
 	messages_with_links: number;
 	top_domains: DomainCount[];
+	top_urls: UrlCount[];
+	/** Full ranked URL list for the "show all" dialog (capped at 5000). */
+	all_urls: UrlCount[];
+	/** True distinct URL count, even when `all_urls` is capped. */
+	unique_url_count: number;
 	platform_links: PlatformLinks;
 
 	messages_with_mentions: number;

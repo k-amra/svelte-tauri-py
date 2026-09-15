@@ -1,5 +1,7 @@
 <script lang="ts">
 	import type { ChannelSummary, ChatStatsResult } from '$lib/api/chatStats';
+	import { openExternal } from '$lib/api/external';
+	import AllLinksDialog from '$lib/components/results/AllLinksDialog.svelte';
 	import SplitByChannel from '$lib/components/results/SplitByChannel.svelte';
 	import PerChannelCommands from '$lib/components/results/PerChannelCommands.svelte';
 	import PerChannelDomains from '$lib/components/results/PerChannelDomains.svelte';
@@ -21,6 +23,13 @@
 	const maxDomain = $derived(
 		stats.top_domains.length > 0 ? Math.max(...stats.top_domains.map((d) => d.count)) : 1
 	);
+	const maxUrl = $derived(
+		stats.top_urls.length > 0 ? Math.max(...stats.top_urls.map((u) => u.count)) : 1
+	);
+
+	const URL_PREVIEW_COUNT = 10;
+	let linksDialogOpen = $state(false);
+	const visibleUrls = $derived(stats.top_urls.slice(0, URL_PREVIEW_COUNT));
 	const maxMention = $derived(
 		stats.top_mentions.length > 0 ? Math.max(...stats.top_mentions.map((m) => m.count)) : 1
 	);
@@ -89,6 +98,59 @@
 				.platform_links.kick} · Other {stats.platform_links.other}
 		</p>
 	</div>
+{/if}
+
+{#if stats.all_urls.length > 0}
+	<div class="lg:col-span-2">
+		<div class="border-border/60 mb-2 flex items-baseline justify-between border-b pb-1">
+			<p class="text-sm font-medium">Top links (by paste count)</p>
+			<span class="text-muted-foreground text-xs">
+				{stats.unique_url_count} unique · {stats.messages_with_links} msgs with links
+			</span>
+		</div>
+
+		<!-- Inline preview stays at 10 rows so the section never grows tall. -->
+		<div class="space-y-1">
+			{#each visibleUrls as u (u.url)}
+				<div class="flex items-center gap-2 text-xs">
+					<button
+						type="button"
+						class="text-primary w-72 truncate text-left hover:underline"
+						title={u.url}
+						onclick={() => void openExternal(u.url)}
+					>
+						{u.url}
+					</button>
+					<div class="bg-muted h-3 flex-1 overflow-hidden rounded-full">
+						<div
+							class="h-full rounded-full bg-sky-500 transition-[width] duration-300"
+							style="width: {(u.count / maxUrl) * 100}%"
+						></div>
+					</div>
+					<span class="w-12 text-right tabular-nums">{u.count.toLocaleString()}</span>
+				</div>
+			{/each}
+		</div>
+
+		{#if stats.all_urls.length > URL_PREVIEW_COUNT}
+			<div class="mt-2 flex justify-center">
+				<button
+					type="button"
+					class="hover:bg-muted border-border/60 rounded-md border px-3 py-1.5 text-xs transition-colors"
+					onclick={() => (linksDialogOpen = true)}
+				>
+					Show all {stats.unique_url_count.toLocaleString()} links
+				</button>
+			</div>
+		{/if}
+	</div>
+
+	<AllLinksDialog
+		bind:open={linksDialogOpen}
+		urls={stats.all_urls}
+		uniqueUrlCount={stats.unique_url_count}
+		maxCount={maxUrl}
+	/>
 {/if}
 
 {#if isMultiChannel}

@@ -235,6 +235,82 @@ def test_commands_links_mentions_and_health():
     assert stats["duplicate_message_count"] >= 1
 
 
+def test_top_urls_ranked_by_occurrences_and_normalized():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "see https://example.com/x", base),
+        ("b", "again https://EXAMPLE.com/x/ here", base + timedelta(minutes=1)),
+        ("c", "twice https://example.com/x and https://example.com/x", base + timedelta(minutes=2)),
+        ("d", "other https://other.org/y", base + timedelta(minutes=3)),
+        ("e", "watch https://www.youtube.com/watch?v=abc123!", base + timedelta(minutes=4)),
+        ("f", "again https://www.youtube.com/watch?v=abc123", base + timedelta(minutes=5)),
+        ("g", "rhetorical https://example.com?", base + timedelta(minutes=6)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_links=True), {})
+    # Occurrence counts (the double paste in one message counts twice);
+    # trailing-slash + case variants collapse into one row, query strings
+    # survive, and sentence punctuation is stripped after capture.
+    assert stats["top_urls"] == [
+        {"url": "https://example.com/x", "count": 4},
+        {"url": "https://www.youtube.com/watch?v=abc123", "count": 2},
+        {"url": "https://example.com", "count": 1},
+        {"url": "https://other.org/y", "count": 1},
+    ]
+
+
+def test_all_urls_bypasses_top_n_cap_with_true_unique_count():
+    from app.scripts.chat_stats.analytics.links import compute_links
+
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", f"link https://example.com/{i:02d}", base + timedelta(minutes=i)) for i in range(5)
+    ]
+    df = make_frame(rows)
+    # top_n=2 caps the preview, but the dialog list keeps all five.
+    out = compute_links(df, top_n=2)
+    assert [u["url"] for u in out["top_urls"]] == [
+        "https://example.com/00",
+        "https://example.com/01",
+    ]
+    assert len(out["all_urls"]) == 5
+    assert out["unique_url_count"] == 5
+    # A tighter dialog cap truncates the list but not the honest count.
+    capped = compute_links(df, top_n=2, all_urls_limit=3)
+    assert len(capped["all_urls"]) == 3
+    assert capped["unique_url_count"] == 5
+    # all_urls_limit=0 skips the work (per-channel summaries, prev period).
+    skipped = compute_links(df, top_n=2, all_urls_limit=0)
+    assert skipped["all_urls"] == []
+    assert skipped["unique_url_count"] == 5
+
+
+def test_top_urls_preserve_case_sensitive_path_and_query():
+    # Regression: lowercasing the whole URL corrupted case-sensitive provider
+    # IDs (YouTube `?v=kJQP7kiw5Fk` ≠ `?v=kjqp7kiw5fk`). Only scheme+host may
+    # be lowercased; path/query/fragment keep their case.
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "watch https://www.youtube.com/watch?v=kJQP7kiw5Fk", base),
+        ("b", "other https://www.youtube.com/watch?v=kjqp7kiw5fk", base + timedelta(minutes=1)),
+        ("c", "host case https://X.com/AbC/ here", base + timedelta(minutes=2)),
+        ("d", "same https://x.com/AbC", base + timedelta(minutes=3)),
+        ("e", "path case differs https://x.com/abc", base + timedelta(minutes=4)),
+    ]
+    stats = cs.compute_stats(make_frame(rows), make_params(include_links=True), {})
+    assert stats["top_urls"] == [
+        {"url": "https://x.com/AbC", "count": 2},
+        {"url": "https://www.youtube.com/watch?v=kJQP7kiw5Fk", "count": 1},
+        {"url": "https://www.youtube.com/watch?v=kjqp7kiw5fk", "count": 1},
+        {"url": "https://x.com/abc", "count": 1},
+    ]
+
+
+def test_top_urls_empty_without_links():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    stats = cs.compute_stats(make_frame([("a", "hello world", base)]), make_params(), {})
+    assert stats["top_urls"] == []
+
+
 def test_self_repetition_counts_same_user_repeats_only():
     base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
     rows = [

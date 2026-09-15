@@ -137,6 +137,11 @@ export function exportAllSectionsCsv(
 		stats.top_domains.map((d) => [d.domain, d.count])
 	);
 	push(
+		'Links (by paste count)',
+		['url', 'count'],
+		stats.top_urls.map((u) => [u.url, u.count])
+	);
+	push(
 		'Mentions',
 		['username', 'count'],
 		stats.top_mentions.map((m) => [m.username, m.count])

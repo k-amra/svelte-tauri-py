@@ -137,7 +137,16 @@ STOPWORDS = frozenset(
 # --- Regex Constants ---
 # URL_RE is intentionally conservative: it truncates on ')' for Wikipedia-style
 # URLs. That's an acceptable tradeoff — fixing it requires paren-balancing.
-URL_RE = r"https?://[^\s<>()\[\]{}\"',;!?]+"
+# URL_RE is intentionally conservative on trailing punctuation only: it stops
+# at whitespace, brackets, quotes, comma/semicolon/exclamation. `?` MUST stay
+# in the class so query strings survive (YouTube `?v=...`, Vimeo, Spotify,
+# …); sentence-ending punctuation is stripped after capture, see
+# URL_TRAILING_PUNCT_RE.
+URL_RE = r"https?://[^\s<>()\[\]{}\"',;!]+"
+
+# Trailing punctuation to strip from a captured URL. Runs after URL_RE, so a
+# rhetorical "https://example.com?" becomes "https://example.com".
+URL_TRAILING_PUNCT_RE = r"[.,;:!?)\]}\"']+$"
 
 # NOTE: Polars' Rust regex engine does not support look-around (neither
 # look-ahead `(?=...)`/`(?!...)` nor look-behind `(?<=...)`/`(?<!...)`). All
