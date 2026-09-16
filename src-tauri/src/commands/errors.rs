@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn error_json_has_exactly_name_and_message_fields() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let err = Error::Io(io_err);
         let json = serde_json::to_value(&err).unwrap();
         let obj = json.as_object().unwrap();

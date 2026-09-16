@@ -139,6 +139,5 @@ mod tests {
 
         let result = String::from_utf8(read_at(base, "name.txt").unwrap());
         assert!(result.is_err());
-        assert!(matches!(result, Err(_)));
     }
 }

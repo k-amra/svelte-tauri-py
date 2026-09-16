@@ -56,7 +56,7 @@ fn app_data_dir(app: &AppHandle) -> String {
 /// CommandChild::kill() (TerminateProcess on the bootloader) leaves the
 /// Python process orphaned. taskkill /T walks the process tree.
 ///
-/// On non-Windows this is a no-op; the caller falls back to child.kill().
+/// Windows-only; non-Windows call sites fall back to child.kill() directly.
 #[cfg(windows)]
 fn kill_process_tree(pid: u32) -> std::io::Result<()> {
     use std::process::Command;
@@ -64,16 +64,10 @@ fn kill_process_tree(pid: u32) -> std::io::Result<()> {
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status()?;
     if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("taskkill exited with status {status}"),
-        ));
+        return Err(std::io::Error::other(format!(
+            "taskkill exited with status {status}"
+        )));
     }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn kill_process_tree(_pid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -520,6 +514,7 @@ pub fn shutdown(app: &AppHandle) {
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
             {
+                #[cfg(windows)]
                 let pid = child.pid();
                 #[cfg(windows)]
                 {
@@ -535,7 +530,6 @@ pub fn shutdown(app: &AppHandle) {
                 }
                 #[cfg(not(windows))]
                 {
-                    // kill_process_tree is a no-op on non-Windows; kill directly.
                     let _ = child.kill();
                 }
             }
@@ -546,6 +540,7 @@ pub fn shutdown(app: &AppHandle) {
     if dev_child_alive(app) {
         if let Some(dev_state) = app.try_state::<DevChild>() {
             if let Some(mut child) = dev_state.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                #[cfg(windows)]
                 let pid = child.id();
                 #[cfg(windows)]
                 if kill_process_tree(pid).is_err() {
