@@ -4,6 +4,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[error("invalid application file path: {0}")]
+    InvalidPath(String),
 }
 
 #[derive(serde::Serialize)]
@@ -12,6 +14,7 @@ pub enum Error {
 enum ErrorName {
     Io(String),
     FromUtf8Error(String),
+    InvalidPath(String),
 }
 
 impl serde::Serialize for Error {
@@ -23,6 +26,7 @@ impl serde::Serialize for Error {
         let name = match self {
             Self::Io(_) => ErrorName::Io(message),
             Self::Utf8(_) => ErrorName::FromUtf8Error(message),
+            Self::InvalidPath(_) => ErrorName::InvalidPath(message),
         };
         name.serialize(serializer)
     }
@@ -55,7 +59,7 @@ mod tests {
 
     #[test]
     fn error_json_has_exactly_name_and_message_fields() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let err = Error::Io(io_err);
         let json = serde_json::to_value(&err).unwrap();
         let obj = json.as_object().unwrap();
@@ -65,4 +69,3 @@ mod tests {
         assert!(obj.contains_key("message"));
     }
 }
-

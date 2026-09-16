@@ -6,9 +6,6 @@
 
 	const gs = new GlobalState();
 
-	// eslint-disable-next-line svelte/no-inspect
-	$inspect(gs.greet, gs.name);
-
 	const handleSubmit = preventDefault(async () => {
 		if (gs.nlen && gs.glen) {
 			await gs.write(FILES.NAME_FILE, gs.name);
@@ -34,10 +31,8 @@
 
 <Card class="w-105 shadow-xl backdrop-blur-sm">
 	<Header class="pt-6">
-		<Title
-			class="bg-linear-to-r from-indigo-500 to-pink-500 bg-clip-text text-center text-3xl font-bold text-transparent"
-		>
-			<p>{message}</p>
+		<Title class="text-center text-3xl font-bold">
+			{message}
 		</Title>
 	</Header>
 	<Content class="p-6">
@@ -51,7 +46,7 @@
 					type="text"
 					placeholder="e.g., Hello, Welcome"
 					bind:value={gs.greet}
-					class="mt-1 border border-indigo-500 focus-visible:ring-2 focus-visible:ring-purple-500"
+					class="mt-1"
 				/>
 			</div>
 			<div>
@@ -63,14 +58,12 @@
 					type="text"
 					placeholder="Enter your name"
 					bind:value={gs.name}
-					class="mt-1 border border-indigo-500 focus-visible:ring-2 focus-visible:ring-purple-500"
+					class="mt-1"
 				/>
 			</div>
 			<div class="flex space-x-4">
-				<Button type="submit" class="flex-1 bg-linear-to-r from-indigo-500 to-pink-500">
-					Save
-				</Button>
-				<Button type="button" variant="outline" onclick={handleReset} class="flex-1 ">Reset</Button>
+				<Button type="submit" class="flex-1">Save</Button>
+				<Button type="button" variant="outline" onclick={handleReset} class="flex-1">Reset</Button>
 			</div>
 		</form>
 	</Content>

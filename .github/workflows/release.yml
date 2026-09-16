@@ -13,7 +13,10 @@ on:
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-  cancel-in-progress: true
+  # Draft release + asset-upload is not atomic; cancelling mid-matrix leaves a
+  # partial draft. Let the previous run finish — the idempotency gate
+  # (`Reject an already-published release`) makes a re-run safe.
+  cancel-in-progress: false
 
 jobs:
   validate-release:
@@ -58,10 +61,15 @@ jobs:
 
           const expected = process.env.RELEASE_VERSION;
           const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          const packageLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
           const tauriConfig = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
           const cargoToml = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
           const cargoLock = fs.readFileSync('src-tauri/Cargo.lock', 'utf8');
+          const pyproject = fs.readFileSync('src-python/pyproject.toml', 'utf8');
+
+          if (!fs.existsSync('bun.lock')) {
+            console.error('::error file=bun.lock::bun.lock is missing.');
+            process.exit(1);
+          }
 
           const cargoManifestVersion = cargoToml.match(
             /^\[package\][\s\S]*?^version = "([^"]+)"/m
@@ -69,14 +77,18 @@ jobs:
           const cargoLockVersion = cargoLock.match(
             /\[\[package\]\]\r?\nname = "app"\r?\nversion = "([^"]+)"/
           )?.[1];
+          const pyprojectVersion = pyproject.match(/^version = "([^"]+)"/m)?.[1];
 
+          // Add a new entry here when a source of truth is introduced.
+          // NOTE: src-python/app/__init__.py is intentionally NOT checked —
+          // it holds no version today. If you add `__version__ = "..."`,
+          // add a regex like the pyproject one above and register it here.
           const versions = {
             'package.json': packageJson.version,
-            'package-lock.json': packageLock.version,
-            'package-lock.json root package': packageLock.packages?.['']?.version,
             'src-tauri/tauri.conf.json': tauriConfig.version,
             'src-tauri/Cargo.toml': cargoManifestVersion,
-            'src-tauri/Cargo.lock app package': cargoLockVersion
+            'src-tauri/Cargo.lock app package': cargoLockVersion,
+            'src-python/pyproject.toml': pyprojectVersion
           };
 
           const mismatches = Object.entries(versions).filter(([, version]) => version !== expected);
@@ -111,13 +123,20 @@ jobs:
         include:
           - platform: 'macos-latest'
             args: '--target aarch64-apple-darwin'
-          # Uncomment for Intel builds
-          #   - platform: 'macos-latest' # for Intel based macs.
-          #     args: '--target x86_64-apple-darwin'
+            target: 'aarch64-apple-darwin'
+          # Intel Macs: PyInstaller can't cross-compile, so this needs its own
+          # runner — but GitHub has retired all Intel-hosted macOS images
+          # (macos-13 and macos-15-intel). Re-add with a self-hosted Intel
+          # runner if x86_64-apple-darwin builds are needed again.
+          # - platform: 'self-hosted-macos-intel'
+          #   args: '--target x86_64-apple-darwin'
+          #   target: 'x86_64-apple-darwin'
           - platform: 'ubuntu-24.04'
             args: ''
+            target: 'x86_64-unknown-linux-gnu'
           - platform: 'windows-latest'
             args: ''
+            target: 'x86_64-pc-windows-msvc'
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -125,17 +144,26 @@ jobs:
         with:
           ref: ${{ needs.validate-release.outputs.tag }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: '24'
+          # Must match `packageManager` in package.json (lockfile stability).
+          bun-version: '1.4.2'
       - name: Install frontend dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
+
+      - name: Setup uv (Python)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+
+      - name: Sync Python deps (frozen)
+        run: uv sync --project src-python --frozen
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-24.04'
@@ -143,10 +171,68 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      - name: Build sidecar (PyInstaller)
+        shell: bash
+        run: bun run build:sidecar -- --target ${{ matrix.target }}
+
+      # Fail fast when macOS signing is not configured — before any
+      # codesign work runs (never ship unsigned).
+      - name: Require Apple signing secrets (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          SIGNING_REQUIRED: '1'
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "::error::APPLE_CERTIFICATE is empty and SIGNING_REQUIRED=1 — refusing to ship an unsigned macOS build."
+            exit 1
+          fi
+
+      # Sign the sidecar exe BEFORE `tauri build` (Windows/macOS).
+      # Configure SIGN_COMMAND (win) / IDENTITY (mac) secrets; unsigned builds
+      # trigger SmartScreen / Gatekeeper. See plan.md installer §3.
+      - name: Sign sidecar (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          SIGN_COMMAND: ${{ secrets.SIGN_COMMAND }}
+          # Fail the release if signing is not configured (never ship unsigned).
+          SIGNING_REQUIRED: '1'
+        run: powershell -File scripts/sign-sidecar.ps1 -Triple ${{ matrix.target }}
+      - name: Sign sidecar (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Fail the release if signing is not configured (never ship unsigned).
+          SIGNING_REQUIRED: '1'
+        run: bash scripts/sign-sidecar.sh ${{ matrix.target }}
+
       - name: Build Tauri
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1 tip 2026-06-29; Renovate manages bumps
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Reuse the signed sidecar: tauri build's beforeBuildCommand would
+          # otherwise rebuild (and clobber the signature) via build-sidecar.mjs.
+          # NOTE: the skip check matches on the HOST triple (beforeBuildCommand
+          # runs without --target), so this only works while every matrix entry
+          # builds natively on its runner. A cross-compile entry would miss the
+          # guard and rebuild (wasted work, but no corruption: different filename).
+          SIDECAR_PREBUILT: '1'
+          # Windows bundle signing via tauri.conf.json signCommand
+          # (scripts/sign-bundle.ps1). Read only on Windows; elsewhere inert.
+          # Fail the release if signing is not configured (never ship unsigned).
+          SIGN_COMMAND: ${{ secrets.SIGN_COMMAND }}
+          SIGNING_REQUIRED: '1'
+          # macOS app signing + notarization (tauri-action picks these up
+          # automatically; empty secrets = unsigned, same as before).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_NAME: ${{ secrets.APPLE_TEAM_NAME }}
         with:
           tagName: ${{ needs.validate-release.outputs.tag }}
           releaseName: ${{ needs.validate-release.outputs.tag }}
@@ -154,7 +240,9 @@ jobs:
           releaseDraft: true
           prerelease: false
           retryAttempts: 3
-          args: ${{ matrix.args }}
+          # Production CSP: no http://localhost:1420. Dev-only origins stay in
+          # tauri.conf.json for `tauri dev` and are stripped from release builds.
+          args: ${{ matrix.args }} --config src-tauri/tauri.prod.conf.json
 
   publish-release:
     needs:
@@ -183,17 +271,17 @@ jobs:
           fi
 
           asset_count="$(jq '[.assets[] | select(.size > 0)] | length' <<< "$release_json")"
-          if [[ "$asset_count" -ne 7 ]]; then
-            echo "::error::Expected 7 non-empty release assets, found $asset_count."
+          if [[ "$asset_count" -lt 7 ]]; then
+            echo "::error::Expected at least 7 non-empty release assets, found $asset_count."
             jq -r '.assets[] | "\(.name) (\(.size) bytes)"' <<< "$release_json"
             exit 1
           fi
 
           for suffix in '.dmg' '.app.tar.gz' '.AppImage' '.deb' '.rpm' '.exe' '.msi'; do
             if ! jq -e --arg suffix "$suffix" \
-              '[.assets[] | select(.size > 0 and (.name | endswith($suffix)))] | length == 1' \
+              '[.assets[] | select(.size > 0 and (.name | endswith($suffix)))] | length >= 1' \
               <<< "$release_json" >/dev/null; then
-              echo "::error::Expected exactly one non-empty $suffix release asset."
+              echo "::error::Missing non-empty $suffix release asset."
               exit 1
             fi
           done

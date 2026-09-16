@@ -6,7 +6,7 @@ Automated regression and smoke tests for the `tauri2-svelte5-shadcn` template.
 
 This test harness serves two complementary goals:
 
-1. **Dependency shield** — Detect breakages when updating Svelte, Tailwind, Lucide, TypeScript, Tauri, or any other dependency. Run `npm run test` after any update and get an immediate pass/fail verdict.
+1. **Dependency shield** — Detect breakages when updating Svelte, Tailwind, Lucide, TypeScript, Tauri, or any other dependency. Run `bun run test` after any update and get an immediate pass/fail verdict.
 
 2. **Development safety net** — Provide working examples of how to test every layer of a Tauri + Svelte 5 application. When you build on top of this template, these tests serve as living documentation for patterns you should replicate for your own code.
 
@@ -16,16 +16,16 @@ This test harness serves two complementary goals:
 
 ```bash
 # Run everything (types + lint + frontend + rust)
-npm run test
+bun run test
 
 # Frontend only (92 tests, ~5s)
-npm run test:unit
+bun run test:unit
 
 # Rust only (9 tests)
-npm run test:rust
+bun run test:rust
 
 # Watch mode during development
-npm run test:watch
+bun run test:watch
 ```
 
 ---

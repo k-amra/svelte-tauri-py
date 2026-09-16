@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Chat stats: per-channel isolated views with Pooled/Channel tabs covering the full metric set.
+- Chat stats: channel attribution badges on pooled top chatters; sticky result tab bar.
+- Chat stats: top links ranked by paste count with query-string-safe extraction and case-preserving normalization, plus an all-links dialog (up to 5000 URLs) that opens links in the OS browser.
+- Harambelogs: client-side message filter panel (text, user, URLs, mentions, commands, emotes, replies, length) with per-message tag chips and text/JSON export.
+- Reliability: graceful sidecar shutdown with bounded wait, CRLF-tolerant SSE parsing, atomic cache writes safe under concurrency, chronological daily arrays.
+- Result navigation: collapsible sections keep their toggle state across re-renders; section links auto-expand their target.
+
 ## 2.1.1 (2026-07-28)
 
 - Use Tailwind CSS 4 canonical utility forms to eliminate editor diagnostics.

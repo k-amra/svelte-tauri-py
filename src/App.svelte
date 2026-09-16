@@ -1,9 +1,28 @@
 <script lang="ts">
-	import HelloWorld from '$lib/components/HelloWorld.svelte';
+	import { onMount } from 'svelte';
+	import { backend } from '$lib/api/backend.svelte';
+	import { theme } from '$lib/theme.svelte';
+	import AppNav from '$lib/components/AppNav.svelte';
+	import { DEFAULT_VIEW, views } from '$lib/views';
+
+	// App owns the global backend lifecycle (init once, dispose on unmount).
+	onMount(() => {
+		theme.init();
+		void backend.init();
+		return () => {
+			void backend.dispose();
+		};
+	});
+
+	let activeId = $state(DEFAULT_VIEW);
+	const activeView = $derived(views.find((v) => v.id === activeId) ?? views[0]);
 </script>
 
-<main
-	class="flex min-h-screen items-center justify-center bg-linear-to-br from-indigo-500 via-purple-500 to-pink-500 p-4 select-none"
->
-	<HelloWorld />
-</main>
+<div class="bg-background text-foreground flex h-screen select-none">
+	<AppNav {views} bind:activeId />
+	<main class="flex-1 overflow-y-auto">
+		<div class="mx-auto flex max-w-5xl justify-center p-6">
+			<activeView.component />
+		</div>
+	</main>
+</div>

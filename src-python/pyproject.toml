@@ -1,0 +1,47 @@
+[project]
+name = "api-server"
+version = "2.1.1"
+description = "Python FastAPI sidecar for the Tauri 2 + Svelte 5 desktop app"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.0",
+  "httpx>=0.27",
+  "polars>=1.0",
+  "tzdata>=2024.1; sys_platform == 'win32'",
+]
+
+[dependency-groups]
+dev = [
+  "pyinstaller>=6.0",
+  "pytest>=8.0",
+  "ruff>=0.11",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+  "E501", # line length is enforced by the formatter, not the linter
+  # FastAPI requires Query()/Path() calls in argument defaults (idiomatic, not a bug).
+  "B008",
+]
+
+[tool.pyinstaller]
+# kept for documentation; real options live in api_server.spec
+noconfirm = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
