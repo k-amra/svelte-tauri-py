@@ -9,6 +9,9 @@
 			"identifier": "shell:allow-spawn",
 			"allow": [{ "name": "binaries/api-server", "sidecar": true }]
 		},
-		"shell:allow-open"
+		{
+			"identifier": "shell:allow-open",
+			"allow": [{ "url": "https://**" }, { "url": "http://**" }]
+		}
 	]
 }

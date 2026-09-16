@@ -14,7 +14,7 @@
 		"build:frontend": "vite build",
 		"build:sidecar": "bun scripts/build-sidecar.mjs",
 		"build": "bun run build:sidecar && bun run build:frontend",
-		"build:app": "bun run build:sidecar && tauri build",
+		"build:app": "bun run build:sidecar && cross-env SIDECAR_PREBUILT=1 tauri build",
 		"tauri:dev": "cross-env SIDECAR_DEV=1 tauri dev",
 		"tauri:dev:binary": "tauri dev",
 		"preview": "vite preview",

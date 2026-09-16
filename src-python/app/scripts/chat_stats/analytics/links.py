@@ -7,9 +7,10 @@ from ..constants import URL_RE, URL_TRAILING_PUNCT_RE
 
 # Cap on the "all URLs" list returned to the UI dialog. A year-long range
 # on a busy channel can have tens of thousands of unique URLs; sending all
-# of them would bloat the job payload. 5000 fits the dialog comfortably and
-# stays well under 1 MB even with long query strings.
-MAX_ALL_URLS = 5000
+# of them would bloat the job payload (and the sidecar's retained-job
+# memory). 2000 fits the dialog comfortably and stays well under 1 MB even
+# with long query strings.
+MAX_ALL_URLS = 2000
 
 
 def _normalize_url_expr() -> pl.Expr:

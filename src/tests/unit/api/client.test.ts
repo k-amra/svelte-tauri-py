@@ -94,6 +94,7 @@ describe('api client', () => {
 		);
 		const { api } = await import('$lib/api/client');
 		const seen: string[] = [];
+		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));
 		const result = await api.waitJob('abc123', (j) => seen.push(`${j.progress}:${j.message}`));
 		expect(result).toEqual(done);
 		expect(seen).toEqual(['0:', '10:ten', '50:half']);
@@ -102,6 +103,10 @@ describe('api client', () => {
 			expect.objectContaining({
 				headers: expect.objectContaining({ Authorization: 'Bearer test' })
 			})
+		);
+		expect(fetchSpy).toHaveBeenCalledWith(
+			'http://127.0.0.1:9999/api/jobs/abc123/ack',
+			expect.objectContaining({ method: 'POST' })
 		);
 	});
 
@@ -122,17 +127,82 @@ describe('api client', () => {
 		expect(seen).toEqual(['0:', '10:ten']);
 	});
 
+	it('waitJob() ignores SSE comment heartbeats', async () => {
+		const done = jobStatus({ status: 'done', progress: 100, message: 'done', result: { n: 1 } });
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(jobStatus()), { status: 200 }));
+		fetchSpy.mockResolvedValueOnce(
+			streamResponse([
+				': heartbeat\n\n',
+				`data: ${JSON.stringify({ seq: 0, progress: 10, message: 'ten', t: 1 })}\n\n`,
+				': heartbeat\n\n',
+				`event: done\ndata: ${JSON.stringify(done)}\n\n`
+			])
+		);
+		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));
+		const { api } = await import('$lib/api/client');
+		const seen: string[] = [];
+		const result = await api.waitJob('abc123', (j) => seen.push(`${j.progress}:${j.message}`));
+		expect(result).toEqual(done);
+		expect(seen).toEqual(['0:', '10:ten']);
+	});
+
+	it('waitJob() surfaces user cancel distinctly without acking', async () => {
+		let errorStream: ((e: unknown) => void) | null = null;
+		const hanging = new ReadableStream<Uint8Array>({
+			start(c) {
+				errorStream = (e: unknown) => c.error(e);
+			}
+		});
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(jobStatus()), { status: 200 }));
+		fetchSpy.mockImplementationOnce((_url, init) => {
+			const signal = (init as RequestInit | undefined)?.signal as AbortSignal | undefined;
+			signal?.addEventListener('abort', () =>
+				errorStream?.(new DOMException('aborted', 'AbortError'))
+			);
+			return Promise.resolve(new Response(hanging, { status: 200 }));
+		});
+		const { api, JobCancelledError } = await import('$lib/api/client');
+		const external = new AbortController();
+		const pending = api.waitJob('abc123', undefined, 1_800_000, external.signal);
+		const assertion = expect(pending).rejects.toThrow(JobCancelledError);
+		setTimeout(() => external.abort(), 10);
+		await assertion;
+		// Seed + SSE only: a cancelled waiter consumes nothing, so no ack.
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
 	it('waitJob() returns the seed directly when already terminal', async () => {
 		const done = jobStatus({ status: 'done', progress: 100, message: 'done' });
 		const fetchSpy = vi.spyOn(globalThis, 'fetch');
 		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(done), { status: 200 }));
 		const { api } = await import('$lib/api/client');
 		const seen: string[] = [];
+		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));
 		const result = await api.waitJob('abc123', (j) => seen.push(j.status));
 		expect(result).toEqual(done);
 		expect(seen).toEqual(['done']);
-		// Seed only — no SSE round-trip.
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		// Seed + ack only — no SSE round-trip.
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		expect(fetchSpy).toHaveBeenCalledWith(
+			'http://127.0.0.1:9999/api/jobs/abc123/ack',
+			expect.objectContaining({ method: 'POST' })
+		);
+	});
+
+	it('waitJob() swallows ack failures', async () => {
+		const done = jobStatus({ status: 'done', progress: 100, message: 'done' });
+		const fetchSpy = vi.spyOn(globalThis, 'fetch');
+		fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(done), { status: 200 }));
+		fetchSpy.mockResolvedValueOnce(new Response('boom', { status: 500 }));
+		const { api } = await import('$lib/api/client');
+		const result = await api.waitJob('abc123');
+		expect(result).toEqual(done);
+		expect(fetchSpy).toHaveBeenCalledWith(
+			'http://127.0.0.1:9999/api/jobs/abc123/ack',
+			expect.objectContaining({ method: 'POST' })
+		);
 	});
 
 	it('apiFetch() skips the debug preview for large bodies', async () => {
@@ -169,6 +239,48 @@ describe('api client', () => {
 		await api.health();
 		const inbound = add.mock.calls.find((c) => c[0].direction === 'in');
 		expect(inbound?.[0].payload).toContain('ok');
+	});
+
+	it('waitJob() defaults to a 30-minute timeout', async () => {
+		// A stream that pends until the abort signal fires — same rig as
+		// the abort-timeout test below, but driven by fake timers so the
+		// suite doesn't wait out the real default. Uses no global setTimeout
+		// spy: a later restoreAllMocks() would resurrect the fake and hang
+		// every subsequent timer-based test.
+		let errorStream: ((e: unknown) => void) | null = null;
+		const hanging = new ReadableStream<Uint8Array>({
+			start(c) {
+				errorStream = (e: unknown) => c.error(e);
+			}
+		});
+		vi.useFakeTimers();
+		try {
+			const fetchSpy = vi.spyOn(globalThis, 'fetch');
+			fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(jobStatus()), { status: 200 }));
+			fetchSpy.mockImplementationOnce((_url, init) => {
+				const signal = (init as RequestInit | undefined)?.signal as AbortSignal | undefined;
+				signal?.addEventListener('abort', () =>
+					errorStream?.(new DOMException('aborted', 'AbortError'))
+				);
+				return Promise.resolve(new Response(hanging, { status: 200 }));
+			});
+			const { api } = await import('$lib/api/client');
+			let settled: string | null = null;
+			const pending = api.waitJob('abc123');
+			void pending.then(
+				() => (settled = 'resolved'),
+				(e: unknown) => (settled = e instanceof Error ? e.message : String(e))
+			);
+			// Just under 30 minutes: still waiting (fails on the old 10-min default).
+			await vi.advanceTimersByTimeAsync(29 * 60_000 + 59_999);
+			expect(settled).toBeNull();
+			// Crossing 30 minutes aborts the stream.
+			await vi.advanceTimersByTimeAsync(1);
+			expect(settled).toBe('job abc123 timed out after 1800000ms');
+			await expect(pending).rejects.toThrow(/timed out after 1800000ms/);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('waitJob() keeps the timeout contract on abort', async () => {

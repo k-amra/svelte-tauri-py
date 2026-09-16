@@ -412,6 +412,12 @@ async def _run_chunked(
             need_to = min(req_to, month_end)
             if need_from >= need_to:
                 continue
+            if not log_cache.is_month_immutable(year, month):
+                # Live month: its TTL may expire between this probe and
+                # `_run_month`'s re-check, which would raise RuntimeError
+                # ("no API client") instead of downloading. Ensure a client.
+                needs_fetch = True
+                break
             chunk = log_cache.load_month(params.channel_id_type, params.channel, year, month)
             if chunk is None:
                 needs_fetch = True
@@ -570,11 +576,10 @@ async def run_all(
         progress(78.0 + (i + 1) / n * 2.0, f"[{ch}] fetching emotes")
         emote_maps.append(await _safe_fetch_emotes(ch, twitch_id))
 
-    merged = pl.concat(frames, how="vertical").sort("ts")
     # Message ids are globally unique per Twitch message, so cross-channel
     # collisions shouldn't happen; dedupe anyway to preserve the one-row-per-
     # message invariant.
-    merged = dedupe_by_id(merged)
+    merged = dedupe_by_id(pl.concat(frames, how="vertical")).sort("ts")
 
     # Union of emote maps. On name collision the later channel wins; emote
     # names are unique per channel but not across the union, and either

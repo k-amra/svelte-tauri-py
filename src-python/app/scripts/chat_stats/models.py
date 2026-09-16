@@ -55,6 +55,10 @@ class Params(BaseModel):
     include_emote_pairs: bool = True
     include_engagement: bool = True
     include_anomalies: bool = True
+    # Latent: not exposed in the UI (the toggle was removed because the
+    # optional `langdetect` dep isn't shipped). Enable by adding the dep
+    # and re-adding the toggles to ChatStatsPanel.svelte — do NOT remove
+    # the backend logic thinking it's dead code.
     include_language: bool = False
     include_copy_paste_chains: bool = True
 

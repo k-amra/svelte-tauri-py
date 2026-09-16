@@ -27,7 +27,7 @@ from .analytics.health import (
 )
 from .analytics.language import detect_language, detect_language_by_day
 from .analytics.length import compute_length_trend
-from .analytics.links import compute_links
+from .analytics.links import MAX_ALL_URLS, compute_links
 from .analytics.mentions import (
     compute_mention_graph,
     compute_mentions,
@@ -57,7 +57,13 @@ from .frame import parse_twitch_emotes
 from .models import Params, Result
 
 
-def compute_stats(df: pl.DataFrame, params: Params, emote_map: dict[str, str]) -> dict:
+def compute_stats(
+    df: pl.DataFrame,
+    params: Params,
+    emote_map: dict[str, str],
+    *,
+    all_urls_limit: int | None = None,
+) -> dict:
     if df.is_empty():
         # Let Pydantic defaults fill everything except required fields.
         return Result(
@@ -147,7 +153,11 @@ def compute_stats(df: pl.DataFrame, params: Params, emote_map: dict[str, str]) -
     if params.include_commands:
         stats.update(compute_commands(df, params.top_n))
     if params.include_links:
-        stats.update(compute_links(df, params.top_n))
+        # `all_urls` is only consumed by the pooled "show all links" dialog.
+        # Callers computing per-channel results pass all_urls_limit=0 to keep
+        # the retained job payload from scaling with the channel count.
+        limit = MAX_ALL_URLS if all_urls_limit is None else all_urls_limit
+        stats.update(compute_links(df, params.top_n, all_urls_limit=limit))
 
     # Mention frame once, feed three consumers.
     if params.include_mentions or params.include_mention_graph or params.include_mutual_mentions:

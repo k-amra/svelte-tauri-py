@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { api } from '$lib/api/client';
+	import { api, JobCancelledError } from '$lib/api/client';
 	import { backend } from '$lib/api/backend.svelte';
 	import type { ChatStatsResult, ComparisonMode } from '$lib/api/chatStats';
 	import { Button } from '$lib/components/ui/button/index';
@@ -23,7 +23,7 @@
 	} from '$lib/api/export';
 	import { ChevronDown } from '@lucide/svelte';
 
-	let channels = $state<string[]>(['demonzz1']);
+	let channels = $state<string[]>(['']);
 
 	/** 'all' = pooled multi-channel run; a channel name = stats scoped to it. */
 	type ChannelScope = 'all' | string;
@@ -116,7 +116,6 @@
 	let includeEmotePairs = $state(true);
 	let includeEngagement = $state(true);
 	let includeAnomalies = $state(true);
-	let includeLanguage = $state(false);
 	let includeCopyPaste = $state(true);
 	let includeStaffList = $state(false);
 	let includeSubscriberList = $state(false);
@@ -130,7 +129,6 @@
 	let includeBotScores = $state(false);
 	let includeLengthTrend = $state(false);
 	let includeCohortRetention = $state(false);
-	let includeLanguageByDay = $state(false);
 	let includeQuoteReplies = $state(false);
 
 	type Preset = 'quick' | 'standard' | 'everything';
@@ -155,9 +153,6 @@
 		includeStaffList = !quick;
 		includeSubscriberList = !quick;
 		includePhrases = everything;
-		// Language needs the optional `langdetect` package on the backend, so
-		// only "Everything" turns it on — Quick/Standard leave it off.
-		includeLanguage = everything;
 
 		includeMentionGraph = everything;
 		includeMutualMentions = everything;
@@ -167,8 +162,6 @@
 		includeBotScores = everything;
 		includeLengthTrend = everything;
 		includeCohortRetention = everything;
-		// Must mirror includeLanguage: the checkbox is disabled when language is off.
-		includeLanguageByDay = everything;
 		includeQuoteReplies = everything;
 	}
 
@@ -187,6 +180,11 @@
 
 	/** Post-run view tab: 'pooled' or a channel name from stats.per_channel. */
 	let activeChannelTab = $state<string>('pooled');
+
+	/** Aborts the in-flight waitJob when the user hits Cancel. The backend
+	 * job itself keeps running (and its cached months are kept); only this
+	 * waiter detaches. Replaced on every run, cleared when the run settles. */
+	let abortController = $state<AbortController | null>(null);
 
 	const displayStats = $derived.by(() => {
 		if (!stats) return null;
@@ -403,7 +401,6 @@
 				include_emote_pairs: includeEmotePairs,
 				include_engagement: includeEngagement,
 				include_anomalies: includeAnomalies,
-				include_language: includeLanguage,
 				include_copy_paste_chains: includeCopyPaste,
 				include_staff_list: includeStaffList,
 				include_subscriber_list: includeSubscriberList,
@@ -416,7 +413,6 @@
 				include_bot_scores: includeBotScores,
 				include_length_trend: includeLengthTrend,
 				include_cohort_retention: includeCohortRetention,
-				include_language_by_day: includeLanguageByDay,
 				include_quote_replies: includeQuoteReplies,
 				session_gap_minutes: sessionGapMinutes,
 				anomaly_sigma: anomalySigma,
@@ -429,21 +425,37 @@
 					comparePrevious && comparisonMode === 'custom' ? toRFC3339(compareToDate) : undefined,
 				max_range_days: maxRangeDays
 			});
-			const done = await api.waitJob(job.job_id, (j) => {
-				jobProgress = j.progress;
-				jobMessage = j.message;
-			});
+			abortController = new AbortController();
+			const done = await api.waitJob(
+				job.job_id,
+				(j) => {
+					jobProgress = j.progress;
+					jobMessage = j.message;
+				},
+				undefined,
+				abortController.signal
+			);
 			if (done.status === 'done') {
 				stats = done.result as ChatStatsResult;
 			} else {
 				error = `Job error: ${done.error ?? 'unknown'}`;
 			}
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			if (e instanceof JobCancelledError) {
+				error =
+					'Run cancelled. The backend job keeps running and already-fetched data stays cached.';
+			} else {
+				error = e instanceof Error ? e.message : String(e);
+			}
 		} finally {
+			abortController = null;
 			loading = false;
 			jobProgress = null;
 		}
+	}
+
+	function cancelJob() {
+		abortController?.abort();
 	}
 
 	/** Plain-language phase for the raw backend progress message.
@@ -780,8 +792,7 @@
 						includeCopyPaste,
 						includeStaffList,
 						includeSubscriberList,
-						includePhrases,
-						includeLanguage
+						includePhrases
 					].filter(Boolean).length}
 					on
 				</span>
@@ -862,11 +873,6 @@
 					label="Subscribers list"
 					title="Subscribers who sent at least one message in range, ranked by volume. Capped; the header shows the true count."
 				/>
-				<ToggleChip
-					bind:checked={includeLanguage}
-					label="Language (optional)"
-					title="Per-language breakdown. Requires the optional langdetect package on the backend."
-				/>
 			</div>
 		</details>
 
@@ -885,8 +891,7 @@
 						includeBotScores,
 						includeLengthTrend,
 						includeCohortRetention,
-						includeQuoteReplies,
-						includeLanguage && includeLanguageByDay
+						includeQuoteReplies
 					].filter(Boolean).length}
 					on
 				</span>
@@ -937,12 +942,6 @@
 					label="Quote replies"
 					title="Inferred A→B replies: A mentions @B within 5 minutes of B's last message."
 				/>
-				<ToggleChip
-					bind:checked={includeLanguageByDay}
-					label="Language by day"
-					title="Top language per calendar day. Also requires 'Language (optional)' to be enabled."
-					disabled={!includeLanguage}
-				/>
 			</div>
 		</details>
 
@@ -957,10 +956,17 @@
 							style="width: {Math.round(jobProgress)}%"
 						></div>
 					</div>
-					<p class="mt-1 text-xs font-medium" data-testid="cs-phase">
-						{phaseLabel}
-						{Math.round(jobProgress)}%
-					</p>
+					<div class="mt-1 flex items-center justify-between gap-2">
+						<p class="text-xs font-medium" data-testid="cs-phase">
+							{phaseLabel}
+							{Math.round(jobProgress)}%
+						</p>
+						{#if loading && abortController}
+							<Button size="sm" variant="destructive" onclick={cancelJob} data-testid="cs-cancel">
+								Cancel
+							</Button>
+						{/if}
+					</div>
 					{#if jobMessage}
 						<p class="text-muted-foreground text-xs" data-testid="cs-phase-detail">{jobMessage}</p>
 					{/if}

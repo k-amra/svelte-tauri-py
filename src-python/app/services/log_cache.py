@@ -61,7 +61,10 @@ MAX_CACHE_BYTES = 500 * 1024 * 1024  # evict oldest entries above this
 # (The timestamp starts at 0, so the first save of each process always
 # sweeps — no separate startup hook needed.)
 EVICT_MIN_INTERVAL_S = 60 * 60
-_last_evict_ts: float = 0.0
+# None = never swept in this process: the first save always sweeps.
+# (A 0.0 epoch would silently disable eviction until monotonic() exceeds
+# the interval — i.e. for the first hour after every boot.)
+_last_evict_ts: float | None = None
 
 
 _cleaned_versions: bool = False
@@ -236,7 +239,7 @@ def save_month(
 
     global _last_evict_ts
     now = time.monotonic()
-    if now - _last_evict_ts >= EVICT_MIN_INTERVAL_S:
+    if _last_evict_ts is None or now - _last_evict_ts >= EVICT_MIN_INTERVAL_S:
         _last_evict_ts = now
         _evict_if_needed()
 

@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
+import polars as pl
 import pytest
 
 from app.core import paths
@@ -83,8 +84,92 @@ def test_second_run_hits_cache_and_force_bypasses(monkeypatch):
     assert len(calls) == 1
     assert r2.total_messages == r1.total_messages
 
-    chat_stats.run(_params(**{**params.model_dump(), "force_refresh": True}))
+    chat_stats.run(params.model_copy(update={"force_refresh": True}))
     assert len(calls) == 2
+
+
+def test_live_month_ttl_expiry_between_probe_and_fetch_still_downloads(monkeypatch):
+    """Regression guard: a live month must always be fetched with a client
+    available, even when its cache looks fresh.
+
+    Before the fix, the local probe could pass on a fresh TTL while
+    `_run_month`'s re-check saw it expired, raising `RuntimeError("Cache
+    miss ... but no API client was provided")`. The fix short-circuits the
+    probe on `is_month_immutable` (a `datetime` check, not the clock), so a
+    live month always takes the fetch path with an owned client.
+    The scripted clock below reproduces the original race: fresh for the
+    first `time.time()` call, expired after. On the fixed code the first
+    call is `_run_month`'s staleness check (the probe short-circuits without
+    consulting the clock) and observes "fresh", so the run is a cache hit;
+    on the old code the first call is the probe (fresh) and the second is
+    the re-check (expired), which raised. Either way the run must complete
+    with correct totals and never raise RuntimeError.
+    """
+    import time as time_module
+
+    now = datetime.now(UTC)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    pool = [
+        _msg("m1", month_start + timedelta(minutes=5)),
+        _msg("m2", now - timedelta(minutes=1)),
+    ]
+    calls: list = []
+    _stub_fetch(monkeypatch, pool, calls)
+    params = _params(month_start, now + timedelta(hours=1))
+
+    r1 = chat_stats.run(params)
+    assert r1.total_messages == 2
+
+    _, meta = log_cache.load_month("channel", params.channel, now.year, now.month)
+    fetched_at = float(meta["fetched_at"])
+    ttl = log_cache.LIVE_TTL_S
+    state = {"probed": False}
+
+    def fake_time():
+        if not state["probed"]:
+            state["probed"] = True
+            return fetched_at + ttl - 5
+        return fetched_at + ttl + 5
+
+    monkeypatch.setattr(time_module, "time", fake_time)
+    r2 = chat_stats.run(params)
+    assert r2.total_messages == 2
+
+
+def test_slice_range_is_half_open():
+    from app.scripts.chat_stats.fetcher import _slice_range
+
+    df = pl.DataFrame({
+        "ts": [datetime(2024, 9, 1, tzinfo=UTC), datetime(2024, 9, 10, 23, tzinfo=UTC)],
+    })
+    out = _slice_range(df, datetime(2024, 9, 1, tzinfo=UTC), datetime(2024, 9, 10, 23, tzinfo=UTC))
+    assert out.height == 1  # end is exclusive
+
+
+@pytest.mark.parametrize(
+    "intervals, need, expected",
+    [
+        ([], ((1, 10), (1, 20)), [((1, 10), (1, 20))]),  # empty intervals
+        ([((1, 10), (1, 20))], ((1, 10), (1, 20)), []),  # covering interval
+        ([((1, 12), (1, 20))], ((1, 10), (1, 20)), [((1, 10), (1, 12))]),  # gap before
+        ([((1, 10), (1, 15))], ((1, 10), (1, 20)), [((1, 15), (1, 20))]),  # gap after
+        (
+            [((1, 10), (1, 12)), ((1, 15), (1, 20))],
+            ((1, 10), (1, 20)),
+            [((1, 12), (1, 15))],
+        ),  # gap between
+    ],
+)
+def test_coverage_gaps_table(intervals, need, expected):
+    from app.scripts.chat_stats.fetcher import _coverage_gaps
+
+    def dt(day: tuple[int, int]) -> datetime:
+        return datetime(2024, day[0], day[1], tzinfo=UTC)
+
+    norm = lambda pair: (dt(pair[0]), dt(pair[1]))  # noqa: E731
+    assert _coverage_gaps([norm(p) for p in intervals], *norm(need)) == [
+        norm(p) for p in expected
+    ]
 
 
 def test_force_refresh_merges_without_double_counting(monkeypatch):

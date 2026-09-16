@@ -212,36 +212,66 @@ pub struct BackendDiagnostics {
 /// blocking HTTP probes (health + authenticated /api/scripts) — only call
 /// it from the Diagnostics panel, never from the startup path.
 #[tauri::command]
-pub fn get_backend(state: tauri::State<'_, BackendState>, diagnostic: Option<bool>) -> BackendInfo {
+pub async fn get_backend(
+    state: tauri::State<'_, BackendState>,
+    diagnostic: Option<bool>,
+) -> Result<BackendInfo, String> {
     let diagnostic = diagnostic.unwrap_or(false);
-    let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(b) = guard.as_ref() else {
-        return BackendInfo {
-            configured: false,
-            port: None,
-            token: None,
-            diagnostics: None,
-        };
+    let (port, token) = {
+        let guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            None => {
+                return Ok(BackendInfo {
+                    configured: false,
+                    port: None,
+                    token: None,
+                    diagnostics: None,
+                })
+            }
+            Some(b) => (b.port, b.token.clone()),
+        }
     };
-    let port = b.port;
-    let token = b.token.clone();
-    drop(guard);
 
+    // The probes do blocking TCP I/O (up to ~9s in the failure case);
+    // keep them off the WebView main thread.
     let diagnostics = if diagnostic {
+        let t = token.clone();
+        let (rust_health, rust_scripts) = tauri::async_runtime::spawn_blocking(move || {
+            (
+                http_get(port, None, "/health").unwrap_or_else(|e| format!("ERROR {e}")),
+                http_get(port, Some(&t), "/api/scripts").unwrap_or_else(|e| format!("ERROR {e}")),
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?;
         Some(BackendDiagnostics {
-            rust_health: http_get(port, None, "/health").unwrap_or_else(|e| format!("ERROR {e}")),
-            rust_scripts: http_get(port, Some(&token), "/api/scripts")
-                .unwrap_or_else(|e| format!("ERROR {e}")),
+            rust_health,
+            rust_scripts,
         })
     } else {
         None
     };
 
-    BackendInfo {
+    Ok(BackendInfo {
         configured: true,
         port: Some(port),
         token: Some(token),
         diagnostics,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ready_line;
+
+    #[test]
+    fn parses_ready_line() {
+        assert_eq!(parse_ready_line("READY 1234"), Some(1234));
+        assert_eq!(parse_ready_line("READY 1234 "), Some(1234));
+        assert_eq!(parse_ready_line("ready 1234"), None);
+        assert_eq!(parse_ready_line("READY abc"), None);
+        assert_eq!(parse_ready_line(""), None);
+        assert_eq!(parse_ready_line("READY"), None);
     }
 }
 
@@ -296,6 +326,7 @@ fn spawn_dev(app: &AppHandle, token: &str, data_dir: &str) {
     }
     let Ok(mut child) = cmd.spawn() else {
         log::error!("SIDECAR_DEV: failed to spawn `uv run python -m app.main` (is uv installed?)");
+        let _ = app.emit("backend-gone", ());
         return;
     };
 

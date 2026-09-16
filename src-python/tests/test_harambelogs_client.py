@@ -5,6 +5,7 @@ import json
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from app.services.harambelogs_client import HarambelogsAPI, HarambelogsError
 
@@ -31,6 +32,8 @@ def test_empty_body_becomes_retryable_error_not_decode_error():
     with pytest.raises(HarambelogsError, match="empty body") as exc_info:
         asyncio.run(_get_logs(_api(handler)))
     assert exc_info.value.status_code is None
+    # Load-bearing: the fetcher's disambiguation keys on this flag.
+    assert exc_info.value.empty_body is True
     assert "HTTP 200" in str(exc_info.value)
 
 
@@ -69,3 +72,19 @@ def test_valid_json_still_parses():
 
     resp = asyncio.run(_get_logs(_api(handler)))
     assert resp.messages == []
+
+
+def test_shape_mismatch_raises_validation_error_not_retryable():
+    """A 200 with the wrong JSON shape is NOT a HarambelogsError.
+
+    The fetcher (`log_fetch._fetch_page`) only catches HarambelogsError, so
+    an upstream shape change is never retried — it surfaces as a hard job
+    failure. Pin that contract here so a silent retry loop can't creep in.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"{}", request=request)
+
+    # raises() fails if the error is a HarambelogsError instead, which
+    # would (incorrectly) route into the fetcher's retry/backoff path.
+    with pytest.raises(ValidationError):
+        asyncio.run(_get_logs(_api(handler)))

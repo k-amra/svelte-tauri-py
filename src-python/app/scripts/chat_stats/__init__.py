@@ -153,11 +153,15 @@ async def _compute_previous_period(
     params: Params,
     current_df: pl.DataFrame,
     api: HarambelogsAPI,
+    progress: Callable[[float, str], None],
 ) -> PreviousPeriod:
     """Fetch + summarize the window selected by `comparison_mode`.
 
     Shares the caller's HTTP client. The recursive params copy sets
     `compare_previous=False`, so the fetch never walks back through history.
+    Progress is remapped into the caller's [92, 99] band so shutdown
+    checkpoints (`progress()` raising `InterruptedError`) still fire during
+    the comparison fetch instead of hanging until Rust force-kills.
     """
     prev_from, prev_to = _resolve_comparison_window(params)
     prev_params = params.model_copy(
@@ -167,8 +171,12 @@ async def _compute_previous_period(
             "compare_previous": False,
         }
     )
+
+    def remap(pct: float, msg: str) -> None:
+        progress(92.0 + pct * 0.07, f"previous period: {msg}" if msg else "previous period")
+
     df, _any_fetch, _trunc, _twitch, _cached, _emote_maps, emote_map, _outside = await run_all(
-        prev_params, lambda p, m: None, api=api
+        prev_params, remap, api=api
     )
 
     from_iso = prev_params.from_date.isoformat()
@@ -278,11 +286,6 @@ async def _run_both_with_api(
         progress(88.0, "computing per-channel summaries")
         from .analytics.per_channel import compute_channel_summary
 
-        # Per-channel top-words needs the same emote-name stopwords the
-        # pooled run uses, otherwise emote names would dominate every
-        # channel's list identically.
-        per_channel_stopwords = STOPWORDS | {v.lower() for v in union_emotes.values()}
-
         if df.is_empty():
             # No merged span to align day arrays to; emit zero summaries so
             # the UI still renders one card per channel.
@@ -291,17 +294,22 @@ async def _run_both_with_api(
                 for ch in params.channels
             ]
         else:
-            summaries = [
-                compute_channel_summary(
-                    df,
-                    ch,
-                    union_emotes,
-                    stopwords=per_channel_stopwords,
-                    merged_min_date=df["ts"].min().date(),
-                    merged_max_date=df["ts"].max().date(),
+            # Per-channel emote map + stopwords: the union map would leak
+            # other channels' emote names into this channel's top-words.
+            summaries = []
+            for i, ch in enumerate(params.channels):
+                ch_emote_map = emote_maps[i] if i < len(emote_maps) else {}
+                ch_stopwords = STOPWORDS | {v.lower() for v in ch_emote_map.values()}
+                summaries.append(
+                    compute_channel_summary(
+                        df,
+                        ch,
+                        ch_emote_map,
+                        stopwords=ch_stopwords,
+                        merged_min_date=df["ts"].min().date(),
+                        merged_max_date=df["ts"].max().date(),
+                    )
                 )
-                for ch in params.channels
-            ]
         stats["channel_summaries"] = summaries
 
         extra: list[str] = []
@@ -364,7 +372,10 @@ async def _run_both_with_api(
                     top_emotes=[],
                 ).model_dump()
             else:
-                ch_stats = compute_stats(ch_df, ch_params, ch_emote_map)
+                # all_urls_limit=0: the per-channel view has no "show all links"
+                # dialog; attaching the full list would multiply the job payload
+                # by the channel count.
+                ch_stats = compute_stats(ch_df, ch_params, ch_emote_map, all_urls_limit=0)
             # Pooled fetch metadata is the honest conservative default: if
             # nothing was fetched pooled, nothing was fetched per-channel.
             ch_stats["truncated"] = truncated
@@ -378,7 +389,7 @@ async def _run_both_with_api(
         if api is None:
             raise RuntimeError("compare_previous requires a shared HTTP client")
         progress(92.0, "computing previous period")
-        stats["previous_period"] = await _compute_previous_period(params, df, api)
+        stats["previous_period"] = await _compute_previous_period(params, df, api, progress)
 
     progress(100.0, "done" if any_fetch else "done (cached)")
     return Result(**stats)

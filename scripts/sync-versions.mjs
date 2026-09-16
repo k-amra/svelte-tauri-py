@@ -14,7 +14,7 @@ console.log(`[version] syncing ${version}`);
 const tauriPath = join(root, 'src-tauri', 'tauri.conf.json');
 const tauri = JSON.parse(readFileSync(tauriPath, 'utf8'));
 tauri.version = version;
-writeFileSync(tauriPath, JSON.stringify(tauri, null, 2) + '\n');
+writeFileSync(tauriPath, JSON.stringify(tauri, null, '\t') + '\n');
 
 function replacePackageVersion(toml, version, file) {
 	const lines = toml.split(/\r?\n/);

@@ -207,9 +207,10 @@ def test_overview_includes_medians_and_roles():
         ("b", "hello world foo bar", datetime(2024, 1, 15, 11, 0, tzinfo=UTC)),
     ]
     stats = cs.compute_stats(make_frame(rows), make_params(), {})
-    assert stats["median_message_length"] is not None
-    assert stats["max_message_length"] is not None
-    assert stats["avg_words_per_message"] is not None
+    # Lengths are 2 ("hi") and 19 ("hello world foo bar").
+    assert stats["median_message_length"] == 10.5
+    assert stats["max_message_length"] == 19
+    assert stats["avg_words_per_message"] == 2.5
     assert isinstance(stats["roles"], list)
     assert stats["top_peaks_5m"] is not None
 
@@ -303,6 +304,27 @@ def test_top_urls_preserve_case_sensitive_path_and_query():
         {"url": "https://www.youtube.com/watch?v=kjqp7kiw5fk", "count": 1},
         {"url": "https://x.com/abc", "count": 1},
     ]
+
+
+def test_compute_stats_all_urls_limit_override():
+    base = datetime(2024, 1, 15, 10, 0, tzinfo=UTC)
+    rows = [
+        ("a", "link https://example.com/1", base),
+        ("b", "link https://example.com/2", base + timedelta(minutes=1)),
+        ("c", "link https://example.com/3", base + timedelta(minutes=2)),
+    ]
+    full = cs.compute_stats(make_frame(rows), make_params(include_links=True), {})
+    assert [u["url"] for u in full["all_urls"]] == [
+        "https://example.com/1",
+        "https://example.com/2",
+        "https://example.com/3",
+    ]
+    assert full["unique_url_count"] == 3
+    # Skipping the dialog list keeps the preview but drops the payload.
+    limited = cs.compute_stats(make_frame(rows), make_params(include_links=True), {}, all_urls_limit=0)
+    assert limited["all_urls"] == []
+    assert limited["unique_url_count"] == 3
+    assert [u["url"] for u in limited["top_urls"]] == [u["url"] for u in full["top_urls"]]
 
 
 def test_top_urls_empty_without_links():

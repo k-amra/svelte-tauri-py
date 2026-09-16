@@ -62,11 +62,13 @@ describe('ChannelSummaryCards', () => {
 		render(ChannelSummaryCards, { summaries });
 		expect(screen.getByText('main')).toBeInTheDocument();
 		expect(screen.getByText('alt')).toBeInTheDocument();
-		expect(screen.getByText(/^5,?000$/)).toBeInTheDocument();
-		expect(screen.getByText(/^1,?000$/)).toBeInTheDocument();
+		// toLocaleString() grouping varies by runner locale ("," vs "." vs
+		// narrow nbsp), so match any single grouping separator — or none.
+		expect(screen.getByText(/^5[\s.,]?000$/)).toBeInTheDocument();
+		expect(screen.getByText(/^1[\s.,]?000$/)).toBeInTheDocument();
 		expect(screen.getByText('2 channels · pooled totals above, splits below')).toBeInTheDocument();
 		// Pooled total in the header (5000 + 1000).
-		expect(screen.getByText(/^6,?000 total messages$/)).toBeInTheDocument();
+		expect(screen.getByText(/^6[\s.,]?000 total messages$/)).toBeInTheDocument();
 	});
 
 	it('shows share-of-total and msgs-per-chatter per channel', () => {

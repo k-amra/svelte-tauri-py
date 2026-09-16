@@ -53,6 +53,15 @@ def test_scripts_requires_token():
     assert r.status_code == 401
 
 
+def test_malformed_non_ascii_auth_returns_401_not_500():
+    # compare_digest raises TypeError on non-ASCII str, which would 500.
+    # Raw bytes bypass httpx's client-side ASCII check; Starlette decodes
+    # them latin-1 into a non-ASCII str on the server side.
+    c = make_client()
+    r = c.get("/api/scripts", headers=[(b"authorization", b"Bearer \xff\xfe")])
+    assert r.status_code == 401
+
+
 def test_harambelogs_search_validates_query():
     c = make_client()
     # Missing required `q` param → 422
@@ -115,7 +124,9 @@ def test_jobs_lifecycle():
     job_id = r.json()["job_id"]
 
     last = None
-    for _ in range(50):
+    # Generous budget: the job itself sleeps ~0.15 s, but a loaded CI box
+    # can stall the worker thread well past the old 2.5 s window.
+    for _ in range(100):
         last = c.get(f"/api/jobs/{job_id}", headers=auth_headers())
         assert last.status_code == 200
         if last.json()["status"] == "done":
@@ -160,6 +171,74 @@ def test_jobs_rejects_over_max_range_with_422():
     )
     assert r.status_code == 422
     assert "max_range_days" in r.text
+
+
+def test_job_ack_unknown_id_is_noop():
+    c = make_client()
+    r = c.post("/api/jobs/doesnotexist/ack", headers=auth_headers())
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
+def test_job_ack_releases_consumed_result():
+    from app.core.jobs import jobs as global_jobs
+
+    def instant(params, progress):
+        return {"ok": True}
+
+    job = global_jobs.submit("t", instant, None)
+    deadline = time.time() + 10
+    while global_jobs.snapshot(job.id)["status"] == "running" and time.time() < deadline:
+        time.sleep(0.01)
+    assert global_jobs.snapshot(job.id)["result"] == {"ok": True}
+    c = make_client()
+    r = c.post(f"/api/jobs/{job.id}/ack", headers=auth_headers())
+    assert r.status_code == 200
+    snap = global_jobs.snapshot(job.id)
+    assert snap["status"] == "done"
+    assert snap["result"] is None
+
+
+def test_job_events_emits_heartbeat_while_running(monkeypatch):
+    import asyncio
+    import threading
+
+    from app.core.jobs import jobs as global_jobs
+    from app.routers import jobs as jobs_router
+
+    gate = threading.Event()
+
+    def blocking(params, progress):
+        gate.wait(10)
+        return {"ok": True}
+
+    # Jump the clock so the first idle loop iteration emits a heartbeat
+    # instead of making the test wait out the 15 s interval. Each call
+    # advances 20 s, so any init/check pair straddles the threshold no
+    # matter how many calls precede it. Note `jobs_router.time` IS the
+    # stdlib `time` module object (shared with `app.core.jobs`), so this
+    # also covers the eviction scan inside `submit`.
+    calls = {"n": 0}
+
+    def fake_time():
+        calls["n"] += 1
+        return 1000.0 + 20.0 * calls["n"]
+
+    monkeypatch.setattr(jobs_router.time, "time", fake_time)
+    job = global_jobs.submit("t", blocking, None)
+    try:
+
+        async def collect():
+            resp = await jobs_router.job_events(job.id)
+            async for chunk in resp.body_iterator:
+                text = chunk.decode() if isinstance(chunk, bytes) else chunk
+                if ": heartbeat" in text:
+                    return text
+            raise AssertionError("stream ended without heartbeat")
+
+        assert asyncio.run(collect()) == ": heartbeat\n\n"
+    finally:
+        gate.set()
 
 
 def test_job_events_ring_buffer_caps_and_cursors():

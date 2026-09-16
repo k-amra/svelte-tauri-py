@@ -94,17 +94,32 @@ def _stub_fetch(monkeypatch, pool: list[FullMessage], calls: list, truncated: bo
     monkeypatch.setattr(fetcher, "fetch_channel_emotes", fake_emotes)
 
 
-def _live_month_range() -> tuple[datetime, datetime]:
-    """Range inside the current (live) month; skips on the month's first minutes."""
+def _near_month_boundary() -> bool:
+    """True when a live-month range cannot be built (month's first minutes)."""
     now = datetime.now(UTC).replace(microsecond=0)
     to_date = now - timedelta(minutes=30)
     month_start = datetime(to_date.year, to_date.month, 1, tzinfo=UTC)
     from_date = max(month_start, to_date - timedelta(days=2))
-    if from_date >= to_date or to_date.month != now.month or to_date.year != now.year:
+    return from_date >= to_date or to_date.month != now.month or to_date.year != now.year
+
+
+def _live_month_range() -> tuple[datetime, datetime]:
+    """Range inside the current (live) month; skips on the month's first minutes."""
+    if _near_month_boundary():
         pytest.skip("too close to a month boundary for a live-month scenario")
-    return from_date, to_date
+    now = datetime.now(UTC).replace(microsecond=0)
+    to_date = now - timedelta(minutes=30)
+    month_start = datetime(to_date.year, to_date.month, 1, tzinfo=UTC)
+    return max(month_start, to_date - timedelta(days=2)), to_date
 
 
+requires_live_month = pytest.mark.skipif(
+    _near_month_boundary(),
+    reason="too close to a month boundary for a live-month scenario",
+)
+
+
+@requires_live_month
 def test_stale_live_month_refreshes_only_the_tail(monkeypatch):
     from_date, to_date = _live_month_range()
     seed_ts = from_date + (to_date - from_date) / 2
@@ -171,6 +186,7 @@ def test_tail_overlap_dedupes_by_message_id(monkeypatch):
     assert result.total_messages == 11  # Sep 5..15, seam message counted once
 
 
+@requires_live_month
 def test_tail_refresh_preserves_truncated_flag(monkeypatch):
     from_date, to_date = _live_month_range()
     seed_ts = from_date + (to_date - from_date) / 2
@@ -248,6 +264,8 @@ def test_quiet_month_contributes_empty_and_caches(monkeypatch):
     chunk = log_cache.load_month("channel", "chan", year, month)
     assert chunk is not None
     assert chunk[0].height == 0  # quiet month cached as empty, not missing
+    assert chunk[1]["complete"] is True
+    assert chunk[1]["message_count"] == 0
 
     calls.clear()
     rerun = chat_stats.run(params)

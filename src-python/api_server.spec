@@ -47,7 +47,11 @@ def _spec_dir():
     # PyInstaller exec()s the spec, so `__file__` is usually undefined;
     # SPECPATH points at the spec's directory. Try SPECPATH first to avoid
     # paying the NameError on every build.
-    candidates = [globals().get("SPECPATH")]
+    # Newer PyInstaller exposes SPECPATH as a list; take the first entry.
+    sp = globals().get("SPECPATH")
+    if isinstance(sp, (list, tuple)):
+        sp = sp[0] if sp else None
+    candidates = [sp]
     try:
         candidates.append(os.path.dirname(os.path.abspath(__file__)))
     except NameError:

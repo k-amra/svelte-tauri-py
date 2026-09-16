@@ -1,11 +1,13 @@
 """Tests for the compare-to-previous-period option in chat_stats.run()."""
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.scripts import chat_stats
+from app.scripts.chat_stats import _resolve_comparison_window, _top_movers
 from app.scripts.chat_stats.frame import messages_to_frame
 from app.services.harambelogs_models import FullMessage
 
@@ -85,6 +87,26 @@ def test_previous_period_empty_window_returns_zeroed_summary(monkeypatch) -> Non
     assert result.previous_period.peak_concurrent_chatters is None
 
 
+def test_previous_period_progress_remapped_into_caller_band(monkeypatch) -> None:
+    """The comparison fetch forwards progress (abort checkpoints included)."""
+    seen: list[tuple[float, str]] = []
+
+    async def fake_run_all(params, progress, api=None):
+        progress(50.0, "downloading")
+        progress(100.0, "")
+        return messages_to_frame([_msg("3", 0)]), False, False, "123", None, [{}], {}, []
+
+    monkeypatch.setattr(chat_stats, "run_all", fake_run_all)
+    current = messages_to_frame([_msg("1", 0)])
+    result = asyncio.run(
+        chat_stats._compute_previous_period(
+            _params(), current, None, lambda p, m: seen.append((p, m))
+        )
+    )
+    assert result.total_messages == 1
+    assert seen == [(95.5, "previous period: downloading"), (99.0, "previous period")]
+
+
 def test_previous_period_skipped_by_default(monkeypatch) -> None:
     calls: list[chat_stats.Params] = []
 
@@ -149,8 +171,6 @@ def test_custom_mode_resolves_explicit_window(monkeypatch) -> None:
 
 
 def test_custom_mode_requires_both_dates() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="requires both"):
         _params(comparison_mode="custom", compare_from_date=BASE - timedelta(days=1))
 
@@ -159,8 +179,6 @@ def test_custom_mode_requires_both_dates() -> None:
 
 
 def test_custom_mode_rejects_inverted_range() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="compare_from_date must be before"):
         _params(
             comparison_mode="custom",
@@ -170,8 +188,6 @@ def test_custom_mode_rejects_inverted_range() -> None:
 
 
 def test_previous_year_uses_calendar_year(monkeypatch) -> None:
-    from app.scripts.chat_stats import _resolve_comparison_window
-
     # Same date one year back, including the Feb 29 → Feb 28 fallback.
     normal = datetime(2025, 3, 15, tzinfo=UTC)
     leap_day = datetime(2024, 2, 29, tzinfo=UTC)
@@ -192,8 +208,6 @@ def test_params_reject_inverted_range_with_compare(monkeypatch) -> None:
 
 
 def test_top_movers_gain_and_loss() -> None:
-    from app.scripts.chat_stats import _top_movers
-
     # Current: u1 8, u2 2, u3 5. Previous: u1 4, u2 6, u3 5.
     current = messages_to_frame(
         [_msg("1", i) for i in range(8)]
@@ -212,8 +226,6 @@ def test_top_movers_gain_and_loss() -> None:
 
 
 def test_top_movers_no_baseline_is_empty() -> None:
-    from app.scripts.chat_stats import _top_movers
-
     current = messages_to_frame([_msg("1", 0)])
     empty = messages_to_frame([])
     assert _top_movers(current, empty) == ([], [])
@@ -221,8 +233,6 @@ def test_top_movers_no_baseline_is_empty() -> None:
 
 
 def test_top_movers_capped() -> None:
-    from app.scripts.chat_stats import _top_movers
-
     # 7 users each gaining 1 message → only top_n kept.
     current = messages_to_frame(
         [_msg(str(u), 2 * u) for u in range(7)] + [_msg(str(u), 2 * u + 1) for u in range(7)]

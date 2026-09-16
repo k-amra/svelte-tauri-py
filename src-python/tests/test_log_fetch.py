@@ -18,9 +18,12 @@ def make_msg(i: int):
 class StubAPI:
     """Endless or scripted pages of `limit`-sized messages.
 
-    The ``/stats`` oracle defaults to *unavailable* (raises): ambiguous
-    pages then take the conservative path, so tests must opt in explicitly
-    via ``stats_count`` whenever they exercise 404/empty bodies.
+    Emulates two upstream shapes: `JsonLogsResponse` (paginated message
+    lists via `get_channel_logs`) and `ChannelLogsStats` (the `/stats`
+    oracle via `get_channel_stats`). The ``/stats`` oracle defaults to
+    *unavailable* (raises): ambiguous pages then take the conservative
+    path, so tests must opt in explicitly via ``stats_count`` whenever
+    they exercise 404/empty bodies.
     """
 
     def __init__(
@@ -96,7 +99,12 @@ def test_pagination_multiple_pages():
     # Anything beyond is bounded tail over-fetch: extra in-flight requests
     # issued before the short page arrived, all landing past the data end.
     assert all(o is not None and o % 1000 == 0 for o in offsets)
-    assert all(o >= 3000 for o in offsets[3:])
+    # Everything past the three real pages is speculative over-fetch: it
+    # lands past the data end and is bounded by the in-flight cap (it is
+    # only ever the requests already in flight when the short page lands).
+    extra = [o for o in offsets if o > 2000]
+    assert all(o >= 3000 for o in extra)
+    assert len(extra) <= log_fetch.CONCURRENCY
     assert sorted(seen) == sorted(o // 1000 for o in offsets)
 
 
@@ -113,6 +121,16 @@ def test_truncation_cap():
     messages, truncated = run_fetch(api, max_pages=2)
     assert len(messages) == 2000
     assert truncated is True
+
+
+def test_status_code_500_is_not_retryable():
+    # 500 is deliberately excluded from RETRYABLE_STATUS_CODES: unlike
+    # 502/503/504 (proxy / upstream-down), a bare 500 from this upstream
+    # has meant "request was malformed", which retries only worsen.
+    api = StubAPI(always_fail_with=HarambelogsError("server error", status_code=500))
+    with pytest.raises(HarambelogsError):
+        run_fetch(api)
+    assert len(api.calls) == 1
 
 
 def test_retry_then_success():

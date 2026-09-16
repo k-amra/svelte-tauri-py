@@ -58,7 +58,8 @@ describe('AllLinksDialog', () => {
 			maxCount: 5,
 			uniqueUrlCount: 5000
 		});
-		expect(screen.getByText(/Showing 2 of 5000 unique/)).toBeInTheDocument();
+		// Grouping separator varies by runner locale (see channel-summary-cards.test.ts).
+		expect(screen.getByText(/Showing 2 of 5[\s.,]?000 unique/)).toBeInTheDocument();
 	});
 
 	it('shows the plain count when nothing is capped', () => {

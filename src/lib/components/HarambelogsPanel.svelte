@@ -11,6 +11,7 @@
 	import { Input } from '$lib/components/ui/input/index';
 	import { Card, Header, Title, Content } from '$lib/components/ui/card/index';
 	import { Label } from '$lib/components/ui/label/index';
+	import { URL_RE } from '$lib/api/patterns';
 
 	type Operation =
 		| 'channels'
@@ -109,9 +110,8 @@
 	);
 
 	// --- Regexes reused across the panel -----------------------------------
-	// `\[` keeps the `[` literal unambiguous inside the class.
-	// eslint-disable-next-line no-useless-escape
-	const URL_RE = /https?:\/\/[^\s<>()\[\]{}"',;!?]+/;
+	// URL_RE lives in $lib/api/patterns.ts (with sync tests) so the panel
+	// and the backend analytics match on query strings.
 	const MENTION_RE = /\B@[A-Za-z0-9_]+/;
 	const COMMAND_RE = /^\s*![A-Za-z0-9_-]+/;
 

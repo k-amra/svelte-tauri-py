@@ -105,6 +105,32 @@ def test_multi_channel_run_attaches_summaries_and_warnings(monkeypatch) -> None:
     assert not any("sum to" in w for w in result.warnings)
 
 
+def test_per_channel_top_words_not_filtered_by_other_channel_emotes(monkeypatch) -> None:
+    """Channel summaries use their own emote map, not the union.
+
+    With the union map, channel B's emote name would land in channel A's
+    stopwords and vanish from A's top-words even when typed as a plain word.
+    """
+
+    async def fake_run_all(params, progress, api=None):
+        frames = [
+            messages_to_frame([_msg_text("1", "a", 0, "KEKWB hello hello")]).with_columns(
+                pl.lit("a").alias("channel")
+            ),
+            messages_to_frame([_msg_text("2", "b", 1, "praise KEKWB")]).with_columns(
+                pl.lit("b").alias("channel")
+            ),
+        ]
+        df = pl.concat(frames, how="vertical").sort("ts")
+        return df, False, False, None, None, [{"e1": "KEKWA"}, {"e2": "KEKWB"}], {"e1": "KEKWA", "e2": "KEKWB"}, []
+
+    monkeypatch.setattr(chat_stats, "run_all", fake_run_all)
+    result = chat_stats.run(_params())
+
+    by_channel = {s.channel: s for s in result.channel_summaries}
+    assert "kekwb" in {w.word for w in by_channel["a"].top_words}
+
+
 def test_pooled_top_chatters_carry_channel_attribution(monkeypatch) -> None:
     """Pooled runs record which channel(s) each top chatter appeared in."""
 
@@ -243,6 +269,29 @@ def test_multi_channel_run_computes_full_per_channel_stats(monkeypatch) -> None:
     assert by_channel["a"].channel_summaries == []
     assert by_channel["a"].per_channel == []
     assert by_channel["a"].previous_period is None
+
+
+def test_multi_channel_per_channel_skips_all_urls(monkeypatch) -> None:
+    """Per-channel views carry no dialog list; the pooled result does."""
+
+    async def fake_run_all(params, progress, api=None):
+        frames = [
+            messages_to_frame([_msg_text("1", "a", 0, "see https://example.com/a")]).with_columns(
+                pl.lit("a").alias("channel")
+            ),
+            messages_to_frame([_msg_text("2", "b", 1, "see https://example.com/b")]).with_columns(
+                pl.lit("b").alias("channel")
+            ),
+        ]
+        df = pl.concat(frames, how="vertical").sort("ts")
+        return df, False, False, None, None, [{}, {}], {}, []
+
+    monkeypatch.setattr(chat_stats, "run_all", fake_run_all)
+    result = chat_stats.run(_params())
+    assert len(result.all_urls) == 2
+    assert result.unique_url_count == 2
+    for c in result.per_channel:
+        assert c.all_urls == []
 
 
 def test_multi_channel_per_channel_empty_channel_is_zeroed(monkeypatch) -> None:

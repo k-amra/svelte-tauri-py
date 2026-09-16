@@ -38,7 +38,9 @@ async def lifespan(app: FastAPI):
 def create_app(token: str, *, enable_docs: bool = False) -> FastAPI:
     async def verify(request: Request) -> None:
         auth = request.headers.get("authorization", "")
-        if not secrets.compare_digest(auth, f"Bearer {token}"):
+        # compare_digest raises TypeError on non-ASCII str inputs, which would
+        # 500 instead of 401 on a malformed Authorization header.
+        if not secrets.compare_digest(auth.encode("utf-8", "ignore"), f"Bearer {token}".encode()):
             raise HTTPException(401, "invalid token")
 
     app = FastAPI(

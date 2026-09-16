@@ -12,8 +12,18 @@
 #   If your invocation needs quoting that survives whitespace tokenization,
 #   point SIGN_COMMAND at a wrapper script that takes the exe as $args[0].
 param(
-  [string]$Triple = (rustc --print host-tuple).Trim()
+  [string]$Triple
 )
+if (-not $Triple) {
+  # Mirror scripts/sign-sidecar.sh: `--print host-tuple` requires Rust >= 1.84;
+  # parse `rustc -Vv` for older toolchains.
+  $Triple = try { (rustc --print host-tuple).Trim() } catch { '' }
+  if (-not $Triple) {
+    $Triple = (rustc -Vv | Select-String '^host: ' |
+      ForEach-Object { $_.ToString().Substring(6).Trim() })
+  }
+  if (-not $Triple) { Write-Error "Cannot determine target triple"; exit 1 }
+}
 $exe = "src-tauri/binaries/api-server-$Triple.exe"
 if (-not (Test-Path $exe)) { Write-Error "Missing $exe — run build:sidecar first"; exit 1 }
 if (-not $env:SIGN_COMMAND) {
@@ -26,12 +36,16 @@ if (-not $env:SIGN_COMMAND) {
 }
 # Tokenize: `& "a b c" arg` treats the whole string as a command name and fails.
 # Split on whitespace, then re-invoke with the exe appended.
-$parts = $env:SIGN_COMMAND -split '\s+' | Where-Object { $_ -ne '' }
+$parts = @($env:SIGN_COMMAND -split '\s+' | Where-Object { $_ -ne '' })
 if ($parts.Count -eq 0) {
   Write-Error "SIGN_COMMAND is empty after tokenization."
   exit 1
 }
-& $parts[0] @($parts[1..($parts.Count - 1)]) $exe
+$rest = @()
+if ($parts.Count -gt 1) {
+  $rest = @($parts[1..($parts.Count - 1)])
+}
+& $parts[0] @rest $exe
 if ($LASTEXITCODE -ne 0) {
   Write-Error "SIGN_COMMAND exited with code $LASTEXITCODE — sidecar is NOT signed."
   exit $LASTEXITCODE

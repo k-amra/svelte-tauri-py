@@ -77,6 +77,23 @@ interface SSEMessage {
 	data: string;
 }
 
+/** Thrown when the caller aborts waitJob via the `signal` parameter (user cancel). */
+export class JobCancelledError extends Error {
+	constructor(jobId: string) {
+		super(`job ${jobId} cancelled`);
+		this.name = 'JobCancelledError';
+	}
+}
+
+/**
+ * Best-effort: tell the backend to drop the job's result payload now that
+ * we've consumed it. Keeps the sidecar's retained-job memory bounded.
+ * Errors are swallowed — a missed ack only costs memory, never correctness.
+ */
+function ackJob(jobId: string): void {
+	void apiFetch(`/api/jobs/${jobId}/ack`, { method: 'POST' }).catch(() => {});
+}
+
 /**
  * Minimal SSE reader over fetch() streaming.
  *
@@ -173,13 +190,37 @@ export const api = {
 	async waitJob(
 		jobId: string,
 		onProgress?: (j: JobStatus) => void,
-		timeoutMs = 600_000
+		// 30 minutes: decade-long first fetches can run long. Must stay
+		// comfortably below the server's MAX_JOB_AGE_S, or jobs get evicted
+		// just as the client gives up waiting for them.
+		timeoutMs = 1_800_000,
+		// Optional user-cancel signal (e.g. a Cancel button). Aborting only
+		// detaches this waiter — the backend job keeps running and its
+		// cached months are kept. The waiter rejects with JobCancelledError
+		// and never acks, so the late result stays retained server-side.
+		signal?: AbortSignal
 	): Promise<JobStatus> {
 		const url = `${backend.base}/api/jobs/${jobId}/events`;
 
 		const ctrl = new AbortController();
 		const timer = setTimeout(() => ctrl.abort(), timeoutMs);
 		const started = Date.now();
+		let cancelled = false;
+		if (signal) {
+			if (signal.aborted) {
+				cancelled = true;
+				ctrl.abort();
+			} else {
+				signal.addEventListener(
+					'abort',
+					() => {
+						cancelled = true;
+						ctrl.abort();
+					},
+					{ once: true }
+				);
+			}
+		}
 
 		// Seed so a UI that starts mid-stream still sees a status object.
 		const seed = await api.getJob(jobId);
@@ -188,6 +229,7 @@ export const api = {
 		// terminal — skip the SSE round-trip entirely. The outer `finally`
 		// still clears the timeout.
 		if (seed.status === 'done' || seed.status === 'error') {
+			ackJob(jobId);
 			return seed;
 		}
 
@@ -197,6 +239,7 @@ export const api = {
 		async function pollUntilTerminal(): Promise<JobStatus> {
 			let last = seed;
 			while (Date.now() - started < timeoutMs) {
+				if (cancelled) throw new JobCancelledError(jobId);
 				if (last.status === 'done' || last.status === 'error') return last;
 				await new Promise((r) => setTimeout(r, 1500));
 				last = await api.getJob(jobId);
@@ -209,7 +252,9 @@ export const api = {
 			try {
 				for await (const msg of readSSE(url, { headers: backend.headers }, ctrl.signal)) {
 					if (msg.event === 'done' || msg.event === 'error') {
-						return JSON.parse(msg.data) as JobStatus;
+						const status = JSON.parse(msg.data) as JobStatus;
+						ackJob(jobId);
+						return status;
 					}
 					if (msg.event === 'message' && msg.data) {
 						// Progress frame: only the fields the UI needs.
@@ -226,8 +271,15 @@ export const api = {
 					}
 				}
 				// Stream ended without a terminal event — poll.
-				return await pollUntilTerminal();
+				const status = await pollUntilTerminal();
+				ackJob(jobId);
+				return status;
 			} catch (e) {
+				// User cancel reads distinctly from a timeout so the UI can
+				// say "cancelled" instead of "timed out".
+				if (cancelled) {
+					throw new JobCancelledError(jobId);
+				}
 				// Timeout abort must keep the old polling contract (Error with
 				// the job id), not leak a DOM AbortError to callers.
 				if (ctrl.signal.aborted) {
@@ -236,7 +288,9 @@ export const api = {
 				// Transport error: fall back to polling. The server may still be
 				// running the job; a broken SSE stream is not a job failure.
 				console.warn(`[api] SSE stream for job ${jobId} broke — falling back to polling:`, e);
-				return await pollUntilTerminal();
+				const status = await pollUntilTerminal();
+				ackJob(jobId);
+				return status;
 			}
 		} finally {
 			clearTimeout(timer);

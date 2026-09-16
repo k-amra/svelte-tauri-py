@@ -57,6 +57,20 @@ def test_channel_dir_is_case_insensitive():
     )
 
 
+def test_save_month_oserror_cleans_tmp_and_returns_silently(monkeypatch):
+    """A failed rename must not leave tmp files behind nor raise."""
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(log_cache.os, "replace", boom)
+    log_cache.save_month("channel", "x", 2024, 1, _frame(), _meta())
+    channel_dir = log_cache.get_month_paths("channel", "x", 2024, 1)[0].parent
+    assert list(channel_dir.glob("*.tmp")) == []
+    assert list(channel_dir.glob("*.parquet")) == []
+    assert log_cache.load_month("channel", "x", 2024, 1) is None
+
+
 def test_save_load_roundtrip():
     log_cache.save_month("channel", "x", 2024, 1, _frame(), _meta())
     hit = log_cache.load_month("channel", "x", 2024, 1)
@@ -114,19 +128,19 @@ def test_is_month_immutable():
 
 def test_eviction_enforces_cap_across_channels(monkeypatch):
     monkeypatch.setattr(log_cache, "MAX_CACHE_BYTES", 0)
-    monkeypatch.setattr(log_cache, "_last_evict_ts", 0.0)
+    monkeypatch.setattr(log_cache, "_last_evict_ts", None)
     log_cache.save_month("channel", "evictme", 2024, 1, _frame(), _meta())
     assert log_cache.load_month("channel", "evictme", 2024, 1) is None
 
 
 def test_eviction_throttled_within_interval(monkeypatch):
     calls: list = []
-    monkeypatch.setattr(log_cache, "_last_evict_ts", 0.0)
+    monkeypatch.setattr(log_cache, "_last_evict_ts", None)
     monkeypatch.setattr(log_cache, "_evict_if_needed", lambda: calls.append(1))
     log_cache.save_month("channel", "a", 2024, 1, _frame(), _meta())
     log_cache.save_month("channel", "b", 2024, 1, _frame(), _meta())
     assert len(calls) == 1  # second save skips the sweep
-    monkeypatch.setattr(log_cache, "_last_evict_ts", 0.0)
+    monkeypatch.setattr(log_cache, "_last_evict_ts", None)
     log_cache.save_month("channel", "c", 2024, 1, _frame(), _meta())
     assert len(calls) == 2
 

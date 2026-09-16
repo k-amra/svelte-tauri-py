@@ -68,6 +68,9 @@ def test_count_parses_irc_tag_occurrences():
 
 
 def test_count_unresolvable_positions_kept_in_brackets():
+    # Intentional: the bracketed id documents an emote that could not be
+    # resolved from the message text — it is the diagnostic signal that
+    # text slicing failed (see frame.py), not noise to filter out.
     # Empty text and malformed ranges can't yield a name: keep the raw id.
     df = chat_stats.messages_to_frame(
         [

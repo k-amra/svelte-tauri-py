@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -33,6 +34,19 @@ async def create_job(req: JobRequest):
     return jobs.snapshot(job.id)
 
 
+@router.post("/jobs/{job_id}/ack")
+async def ack_job(job_id: str):
+    """Drop a completed job's result payload after the client has consumed it.
+
+    Best-effort and idempotent: unknown/evicted jobs are a no-op, and a job
+    that is still running is left alone (release only nulls the result).
+    """
+    from app.core.jobs import jobs
+
+    jobs.release(job_id)
+    return {"status": "ok"}
+
+
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str):
     from app.core.jobs import jobs
@@ -49,6 +63,7 @@ async def job_events(job_id: str):
 
     async def gen():
         seen = -1  # start before the first event (seq starts at 0)
+        last_heartbeat = time.time()
         while True:
             batch = jobs.events_since(job_id, seen)
             if batch is None:
@@ -73,6 +88,12 @@ async def job_events(job_id: str):
             if status in ("done", "error"):
                 yield f"event: {status}\ndata: {json.dumps(snapshot)}\n\n"
                 return
+            # SSE comment: keeps idle connections alive through proxies and
+            # WebViews that drop quiet streams. Clients must ignore `:` lines
+            # (readSSE does) — this frame carries no event and no data.
+            if time.time() - last_heartbeat > 15:
+                yield ": heartbeat\n\n"
+                last_heartbeat = time.time()
             await asyncio.sleep(0.2)
 
     return StreamingResponse(gen(), media_type="text/event-stream")

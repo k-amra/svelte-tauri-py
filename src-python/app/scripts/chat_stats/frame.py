@@ -117,6 +117,7 @@ def messages_to_frame(messages: list[FullMessage]) -> pl.DataFrame:
 
 def dedupe_by_id(df: pl.DataFrame) -> pl.DataFrame:
     """Dedupe by message id, keeping the last occurrence.
+    Order-preserving: null-id rows stay in their original position.
 
     Null-id rows are kept as distinct rows (not collapsed), so a message
     whose upstream id is missing cannot silently delete other null-id
@@ -125,13 +126,15 @@ def dedupe_by_id(df: pl.DataFrame) -> pl.DataFrame:
     """
     if df.is_empty() or "id" not in df.columns:
         return df
-    non_null = df.filter(pl.col("id").is_not_null())
-    null_part = df.filter(pl.col("id").is_null())
+    indexed = df.with_row_index("__dedupe_idx")
+    non_null = indexed.filter(pl.col("id").is_not_null())
+    null_part = indexed.filter(pl.col("id").is_null())
     if not non_null.is_empty():
         non_null = non_null.unique(subset=["id"], keep="last", maintain_order=True)
     if null_part.is_empty():
-        return non_null
-    return pl.concat([non_null, null_part], how="vertical")
+        return non_null.drop("__dedupe_idx")
+    out = pl.concat([non_null, null_part], how="vertical")
+    return out.sort("__dedupe_idx").drop("__dedupe_idx")
 
 
 def extract_twitch_id(messages: list[FullMessage]) -> str | None:

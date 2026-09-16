@@ -157,6 +157,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Sync Python deps (frozen)
+        run: uv sync --project src-python --frozen
+
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -171,6 +174,20 @@ jobs:
       - name: Build sidecar (PyInstaller)
         shell: bash
         run: bun run build:sidecar -- --target ${{ matrix.target }}
+
+      # Fail fast when macOS signing is not configured — before any
+      # codesign work runs (never ship unsigned).
+      - name: Require Apple signing secrets (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          SIGNING_REQUIRED: '1'
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "::error::APPLE_CERTIFICATE is empty and SIGNING_REQUIRED=1 — refusing to ship an unsigned macOS build."
+            exit 1
+          fi
 
       # Sign the sidecar exe BEFORE `tauri build` (Windows/macOS).
       # Configure SIGN_COMMAND (win) / IDENTITY (mac) secrets; unsigned builds
@@ -192,20 +209,8 @@ jobs:
           SIGNING_REQUIRED: '1'
         run: bash scripts/sign-sidecar.sh ${{ matrix.target }}
 
-      - name: Require Apple signing secrets (macOS)
-        if: startsWith(matrix.platform, 'macos')
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          SIGNING_REQUIRED: '1'
-        run: |
-          if [[ -z "$APPLE_CERTIFICATE" ]]; then
-            echo "::error::APPLE_CERTIFICATE is empty and SIGNING_REQUIRED=1 — refusing to ship an unsigned macOS build."
-            exit 1
-          fi
-
       - name: Build Tauri
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1 tip 2026-06-29; Renovate manages bumps
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Reuse the signed sidecar: tauri build's beforeBuildCommand would
@@ -215,6 +220,11 @@ jobs:
           # builds natively on its runner. A cross-compile entry would miss the
           # guard and rebuild (wasted work, but no corruption: different filename).
           SIDECAR_PREBUILT: '1'
+          # Windows bundle signing via tauri.conf.json signCommand
+          # (scripts/sign-bundle.ps1). Read only on Windows; elsewhere inert.
+          # Fail the release if signing is not configured (never ship unsigned).
+          SIGN_COMMAND: ${{ secrets.SIGN_COMMAND }}
+          SIGNING_REQUIRED: '1'
           # macOS app signing + notarization (tauri-action picks these up
           # automatically; empty secrets = unsigned, same as before).
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
