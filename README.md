@@ -2,6 +2,18 @@
 
 Simple boilerplate for Tauri 2 with Svelte 5 (and shadcn-svelte).
 
+## Screenshots
+
+Chat statistics for a Twitch channel, computed locally by the Python sidecar.
+
+![Query builder with channels, date presets and analysis sections](docs/images/1.png)
+![Overview with headline tiles, top chatters and activity heatmaps](docs/images/2.png)
+![Activity and time: per-day charts, seasonality, peaks, sessions and anomalies](docs/images/3.png)
+![Words and emotes: diversity, pairs and phrases](docs/images/4.png)
+![Links and commands: domains, top links by paste count and mentions](docs/images/5.png)
+![Duplicates, copy-paste chains, roles and staff lists](docs/images/6.png)
+![Engagement, concentration, message classes, Lorenz curve and cohorts](docs/images/7.png)
+
 ## Requirements
 
 - [Rust](https://www.rust-lang.org/tools/install) (stable toolchain)
