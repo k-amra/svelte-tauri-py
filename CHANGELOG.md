@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.2 (2026-09-16)
+
+- Release pipeline: fixed bundle `signCommand` working directory, Apple signing env only exported when configured, ASCII-only signing scripts.
+
 ## 2.2.1 (2026-09-16)
 
 - Release pipeline: ASCII-only signing scripts, opt-in strict signing via `SIGNING_REQUIRED`, placeholder sidecar so static checks run before the slow PyInstaller build.

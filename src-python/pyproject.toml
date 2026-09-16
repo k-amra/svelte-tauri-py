@@ -1,6 +1,6 @@
 [project]
 name = "api-server"
-version = "2.2.1"
+version = "2.2.2"
 description = "Python FastAPI sidecar for the Tauri 2 + Svelte 5 desktop app"
 readme = "README.md"
 requires-python = ">=3.12"
