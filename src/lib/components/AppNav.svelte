@@ -7,9 +7,7 @@
 
 	let { views, activeId = $bindable() }: { views: ViewDefinition[]; activeId: string } = $props();
 
-	const themeLabel = $derived(
-		theme.value === 'system' ? 'Theme: system' : `Theme: ${theme.value}`
-	);
+	const themeLabel = $derived(theme.value === 'system' ? 'Theme: system' : `Theme: ${theme.value}`);
 	const ThemeIcon = $derived(
 		theme.value === 'system' ? Monitor : theme.resolved === 'dark' ? Moon : Sun
 	);

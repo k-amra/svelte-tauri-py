@@ -112,4 +112,3 @@ To keep the suite fast (total execution under 8 seconds), the following scenario
 6. **Tauri Plugin Integration:** Tests do not validate the behavior of Tauri plugins (e.g., `tauri-plugin-log`) in a real WebView context. Plugin APIs are trusted but not exercised.
 
 7. **Build Artifact Integrity:** The suite does not validate the contents of production bundles (e.g., asset hashing, chunk splitting, bundle size budgets). It only verifies that `vite build` exits without errors.
-

@@ -63,6 +63,7 @@ my-app/
 ```
 
 **Startup sequence (Rust owns the lifecycle):**
+
 1. Tauri `setup()` generates a random token and picks a free port (bind to `127.0.0.1:0`, read the port, release it).
 2. Spawn sidecar via `tauri-plugin-shell` with args `--port 0 --token <t>` (or pass through env). Python binds to the port and prints a single line `READY <port>` to stdout.
 3. Rust waits for that line (with timeout), then polls `GET /health` once to confirm.
@@ -98,15 +99,15 @@ def run(params: Params, progress=lambda pct, msg="": None) -> Result:
 
 `registry.py` imports everything in `scripts/`, and a generic router exposes:
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /health` | readiness (no auth, used by Rust) |
-| `GET /api/scripts` | list scripts + their JSON Schema (from Pydantic) → UI can auto-render forms |
-| `POST /api/scripts/{name}/run` | sync run for fast scripts |
-| `POST /api/jobs` `{script, params}` | start long-running script → returns `job_id` |
-| `GET /api/jobs/{id}` | status/progress/result |
-| `GET /api/jobs/{id}/events` | SSE stream for live progress/log lines |
-| `POST /shutdown` | graceful stop |
+| Endpoint                            | Purpose                                                                     |
+| ----------------------------------- | --------------------------------------------------------------------------- |
+| `GET /health`                       | readiness (no auth, used by Rust)                                           |
+| `GET /api/scripts`                  | list scripts + their JSON Schema (from Pydantic) → UI can auto-render forms |
+| `POST /api/scripts/{name}/run`      | sync run for fast scripts                                                   |
+| `POST /api/jobs` `{script, params}` | start long-running script → returns `job_id`                                |
+| `GET /api/jobs/{id}`                | status/progress/result                                                      |
+| `GET /api/jobs/{id}/events`         | SSE stream for live progress/log lines                                      |
+| `POST /shutdown`                    | graceful stop                                                               |
 
 Adding a new capability = drop a file in `scripts/`, no Rust change, no manual route wiring.
 
@@ -120,24 +121,27 @@ Adding a new capability = drop a file in `scripts/`, no Rust change, no manual r
 
 ## 6. `AGENTS.md` — what to put in it
 
-This file is for coding agents (Codex, Claude Code, Cursor, etc.), so it should tell them *how the project is wired and how to extend it without breaking the contract*. Proposed sections:
+This file is for coding agents (Codex, Claude Code, Cursor, etc.), so it should tell them _how the project is wired and how to extend it without breaking the contract_. Proposed sections:
 
 ```markdown
 # AGENTS.md
 
 ## Project overview
+
 Tauri 2 desktop app. Frontend: Svelte 5 (runes) + shadcn-svelte + Tailwind.
 Backend: Python 3.12 FastAPI sidecar, bundled with PyInstaller, spawned by Rust.
 Frontend ↔ backend communication is HTTP on 127.0.0.1 with a bearer token.
 Rust is ONLY for process lifecycle and native OS access — do not add business logic there.
 
 ## Where things live
+
 - src/lib/api/client.ts — the only place that calls fetch(). Use it.
 - src-python/app/scripts/ — all Python logic. One file per capability.
 - src-python/app/routers/ — thin HTTP adapters. No logic here.
 - src-tauri/src/sidecar.rs — spawn/health/shutdown. Rarely needs changes.
 
 ## How to add a new Python capability
+
 1. Create src-python/app/scripts/<name>.py with Params, Result (Pydantic), NAME, DESCRIPTION, run().
 2. It is auto-registered. Do not edit routers for this.
 3. Regenerate TS types: `bun run gen:types` (pulls /openapi.json).
@@ -145,13 +149,15 @@ Rust is ONLY for process lifecycle and native OS access — do not add business 
 5. Write a test in src-python/tests/test_<name>.py.
 
 ## Commands
-- `bun run dev`            — Tauri dev + uvicorn --reload (SIDECAR_DEV=1)
-- `bun run build:sidecar`  — PyInstaller → src-tauri/binaries/
-- `bun run build`          — full release build
-- `uv run pytest`          — Python tests
-- `bun run check`          — svelte-check + eslint
+
+- `bun run dev` — Tauri dev + uvicorn --reload (SIDECAR_DEV=1)
+- `bun run build:sidecar` — PyInstaller → src-tauri/binaries/
+- `bun run build` — full release build
+- `uv run pytest` — Python tests
+- `bun run check` — svelte-check + eslint
 
 ## Rules / conventions
+
 - Svelte 5 runes only ($state, $derived, $props); no legacy stores or `export let`.
 - Every FastAPI route except /health requires `Depends(verify_token)`.
 - Long-running scripts (>2s) must use the jobs API and report progress().
@@ -160,6 +166,7 @@ Rust is ONLY for process lifecycle and native OS access — do not add business 
 - shadcn components: `bunx shadcn-svelte@next add <component>`; don't hand-edit src/lib/components/ui.
 
 ## Gotchas
+
 - Sidecar binary name must end with the Rust target triple.
 - Killing the PyInstaller PID doesn't kill the child; use POST /shutdown first.
 - After changing Python, rerun build:sidecar before testing a release build.
@@ -186,20 +193,20 @@ The sidecar rides along automatically: binaries declared in tauri.conf.json's ex
 
 ```jsonc
 {
-  "productName": "MyApp",
-  "identifier": "com.yourorg.myapp",
-  "bundle": {
-    "active": true,
-    "targets": ["nsis", "msi", "dmg", "deb", "rpm", "appimage"],
-    "externalBin": ["binaries/api-server"],
-    "icon": ["icons/icon.ico", "icons/icon.icns", "icons/128x128.png"],
-    "windows": {
-      "nsis": { "installMode": "perUser", "languages": ["English"] },
-      "certificateThumbprint": null   // or use signCommand for Azure Trusted Signing
-    },
-    "macOS": { "minimumSystemVersion": "11.0" },
-    "createUpdaterArtifacts": true
-  }
+	"productName": "MyApp",
+	"identifier": "com.yourorg.myapp",
+	"bundle": {
+		"active": true,
+		"targets": ["nsis", "msi", "dmg", "deb", "rpm", "appimage"],
+		"externalBin": ["binaries/api-server"],
+		"icon": ["icons/icon.ico", "icons/icon.icns", "icons/128x128.png"],
+		"windows": {
+			"nsis": { "installMode": "perUser", "languages": ["English"] },
+			"certificateThumbprint": null // or use signCommand for Azure Trusted Signing
+		},
+		"macOS": { "minimumSystemVersion": "11.0" },
+		"createUpdaterArtifacts": true
+	}
 }
 ```
 
@@ -209,20 +216,20 @@ Then `bun run tauri build` → installers appear in `src-tauri/target/release/bu
 
 These are the issues that only surface once you run the installer on a machine that isn't your dev box:
 
-| Problem | Fix |
-|---|---|
+| Problem                                                                                                                                                     | Fix                                                                                                                                                                                                                                                               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **PyInstaller `--onefile` extracts to `%TEMP%` on every launch** → 2–5s cold start, plus the “Tauri only knows the bootloader PID” kill problem from before | Use **`--onedir`** mode. The main executable goes in `externalBin`, and the `_internal/` folder goes in `bundle.resources`. Then set `cwd`/`sys._MEIPASS`‑relative paths accordingly. Startup drops to a few hundred ms and the PID you spawn is the real server. |
-| **Missing system libs on user machines** (Linux `libssl`, Windows `vcruntime`) | PyInstaller bundles most; for Linux build on the *oldest* glibc you support (e.g. Ubuntu 22.04 in CI), or ship AppImage which is self‑contained. |
-| **Antivirus/SmartScreen flags the PyInstaller exe** | Code‑sign both the Tauri exe *and* the sidecar exe (see §3). Avoid UPX compression in PyInstaller — it's the #1 false‑positive trigger. |
-| **Writable data** — the install dir is read‑only (Program Files, `/Applications`) | Never write next to the binary. Rust passes `app.path().app_data_dir()` to Python as `--data-dir`; Python writes SQLite/logs/cache there. |
-| **Port conflicts on user machines** | Already covered by the “bind to 127.0.0.1:0, print READY <port>” handshake — keep it. |
-| **Firewall prompt on Windows** for the Python exe | Binding to `127.0.0.1` only (not `0.0.0.0`) avoids the Windows Firewall dialog. |
-| **Orphaned Python process after crash/uninstall** | On startup, Rust writes the sidecar PID to app data; on next startup, kill any stale PID first. On Windows, additionally spawn with a Job Object (`CREATE_BREAKAWAY_FROM_JOB` off) so child dies with parent. |
+| **Missing system libs on user machines** (Linux `libssl`, Windows `vcruntime`)                                                                              | PyInstaller bundles most; for Linux build on the _oldest_ glibc you support (e.g. Ubuntu 22.04 in CI), or ship AppImage which is self‑contained.                                                                                                                  |
+| **Antivirus/SmartScreen flags the PyInstaller exe**                                                                                                         | Code‑sign both the Tauri exe _and_ the sidecar exe (see §3). Avoid UPX compression in PyInstaller — it's the #1 false‑positive trigger.                                                                                                                           |
+| **Writable data** — the install dir is read‑only (Program Files, `/Applications`)                                                                           | Never write next to the binary. Rust passes `app.path().app_data_dir()` to Python as `--data-dir`; Python writes SQLite/logs/cache there.                                                                                                                         |
+| **Port conflicts on user machines**                                                                                                                         | Already covered by the “bind to 127.0.0.1:0, print READY <port>” handshake — keep it.                                                                                                                                                                             |
+| **Firewall prompt on Windows** for the Python exe                                                                                                           | Binding to `127.0.0.1` only (not `0.0.0.0`) avoids the Windows Firewall dialog.                                                                                                                                                                                   |
+| **Orphaned Python process after crash/uninstall**                                                                                                           | On startup, Rust writes the sidecar PID to app data; on next startup, kill any stale PID first. On Windows, additionally spawn with a Job Object (`CREATE_BREAKAWAY_FROM_JOB` off) so child dies with parent.                                                     |
 
 ## 3. Code signing & notarization (not optional for real users)
 
 - **Windows:** unsigned installers get the SmartScreen “unrecognized app” wall. Options: an OV/EV certificate, or Azure Trusted Signing (cheapest for indie devs). Tauri supports a `signCommand` hook so you can sign with any tool. Crucially, sign the **sidecar exe too** — Tauri signs its own exe but you must sign `api-server-*.exe` in your `build:sidecar` step before bundling.
-- **macOS:** Gatekeeper will refuse to run unsigned apps downloaded from the internet. You need an Apple Developer account ($99/yr), sign with a Developer ID cert, and notarize. Tauri handles this via env vars (`APPLE_CERTIFICATE`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) in CI. The PyInstaller binary must also be signed with hardened runtime — add `codesign --force --options runtime --sign "$IDENTITY"` on the sidecar (and every `.so`/`.dylib` inside `_internal/`) in your build script, otherwise notarization fails.
+- **macOS:** Gatekeeper will refuse to run unsigned apps downloaded from the internet. You need an Apple Developer account ($99/yr), sign with a Developer ID cert, and notarize. Tauri handles this via env vars (`APPLE_CERTIFICATE`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) in CI. The PyInstaller binary must also be signed with hardened runtime — add `codesign --force --options runtime --sign "$IDENTITY"`on the sidecar (and every`.so`/`.dylib`inside`_internal/`) in your build script, otherwise notarization fails.
 - **Linux:** no signing required for `.deb`/`.rpm`/AppImage; optionally GPG‑sign the repo if you host one.
 
 ## 4. Auto‑updates
@@ -247,9 +254,9 @@ strategy:
         target: x86_64-pc-windows-msvc
       - platform: macos-latest
         target: aarch64-apple-darwin
-      - platform: macos-13          # intel
+      - platform: macos-13 # intel
         target: x86_64-apple-darwin
-      - platform: ubuntu-22.04      # oldest glibc you support
+      - platform: ubuntu-22.04 # oldest glibc you support
         target: x86_64-unknown-linux-gnu
 steps:
   - uses: actions/checkout@v4
@@ -286,6 +293,7 @@ Add to `AGENTS.md` and your release checklist:
 
 ```markdown
 ## Packaging & release
+
 - Sidecar is built in --onedir mode; exe → externalBin, _internal/ → bundle.resources.
 - Python must never write next to its executable; use --data-dir passed by Rust.
 - Sign the sidecar exe BEFORE `tauri build` (scripts/sign-sidecar.{ps1,sh}).
@@ -294,7 +302,6 @@ Add to `AGENTS.md` and your release checklist:
 - Release = push tag vX.Y.Z → CI builds nsis/msi/dmg/deb/rpm/AppImage + latest.json.
 - Always test the built installer on a clean VM before publishing a release.
 ```
-
 
 Here's the complete step-by-step setup, from empty folder to a working dev loop with the Python sidecar.
 
@@ -413,23 +420,23 @@ This installs `tauri-plugin-shell` (Rust), `@tauri-apps/plugin-shell` (JS), and 
 
 ```jsonc
 {
-  "bundle": {
-    "externalBin": ["binaries/api-server"]
-  }
+	"bundle": {
+		"externalBin": ["binaries/api-server"]
+	}
 }
 ```
 
-**`src-tauri/capabilities/default.json`** — permit *only* your sidecar. Use the shell:allow-spawn permission scoped to your binary with "sidecar": true:
+**`src-tauri/capabilities/default.json`** — permit _only_ your sidecar. Use the shell:allow-spawn permission scoped to your binary with "sidecar": true:
 
 ```json
 {
-  "permissions": [
-    "core:default",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [{ "name": "binaries/api-server", "sidecar": true }]
-    }
-  ]
+	"permissions": [
+		"core:default",
+		{
+			"identifier": "shell:allow-spawn",
+			"allow": [{ "name": "binaries/api-server", "sidecar": true }]
+		}
+	]
 }
 ```
 
@@ -490,31 +497,33 @@ This naming rule is the #1 setup failure: "externalBin": ["binaries/my-sidecar"]
 **`scripts/build-sidecar.mjs`:**
 
 ```js
-import { execSync } from "node:child_process";
-import { cpSync, mkdirSync } from "node:fs";
+import { execSync } from 'node:child_process';
+import { cpSync, mkdirSync } from 'node:fs';
 
-const triple = execSync("rustc --print host-tuple").toString().trim();
-const ext = process.platform === "win32" ? ".exe" : "";
+const triple = execSync('rustc --print host-tuple').toString().trim();
+const ext = process.platform === 'win32' ? '.exe' : '';
 
-execSync("uv run pyinstaller api_server.spec --noconfirm", { cwd: "src-python", stdio: "inherit" });
+execSync('uv run pyinstaller api_server.spec --noconfirm', { cwd: 'src-python', stdio: 'inherit' });
 
-mkdirSync("src-tauri/binaries", { recursive: true });
+mkdirSync('src-tauri/binaries', { recursive: true });
 cpSync(
-  `src-python/dist/api-server/api-server${ext}`,
-  `src-tauri/binaries/api-server-${triple}${ext}`
+	`src-python/dist/api-server/api-server${ext}`,
+	`src-tauri/binaries/api-server-${triple}${ext}`
 );
-cpSync("src-python/dist/api-server/_internal", "src-tauri/resources/_internal", { recursive: true });
+cpSync('src-python/dist/api-server/_internal', 'src-tauri/resources/_internal', {
+	recursive: true
+});
 ```
 
 Wire into **`package.json`**:
 
 ```json
 {
-  "scripts": {
-    "build:sidecar": "node scripts/build-sidecar.mjs",
-    "dev": "cross-env SIDECAR_DEV=1 tauri dev",
-    "build": "bun run build:sidecar && tauri build"
-  }
+	"scripts": {
+		"build:sidecar": "node scripts/build-sidecar.mjs",
+		"dev": "cross-env SIDECAR_DEV=1 tauri dev",
+		"build": "bun run build:sidecar && tauri build"
+	}
 }
 ```
 
@@ -529,19 +538,29 @@ bun add -d openapi-typescript   # optional: type generation from /openapi.json
 **`src/lib/api/backend.svelte.ts`:**
 
 ```ts
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 let port = $state(0);
-let token = $state("");
+let token = $state('');
 export const backend = {
-  get ready() { return port > 0; },
-  get base() { return `http://127.0.0.1:${port}`; },
-  get headers() { return { Authorization: `Bearer ${token}` }; },
-  async init() {
-    await listen<number>("backend-ready", (e) => { port = e.payload; });
-    try { [port, token] = await invoke<[number, string]>("get_backend"); } catch {}
-  },
+	get ready() {
+		return port > 0;
+	},
+	get base() {
+		return `http://127.0.0.1:${port}`;
+	},
+	get headers() {
+		return { Authorization: `Bearer ${token}` };
+	},
+	async init() {
+		await listen<number>('backend-ready', (e) => {
+			port = e.payload;
+		});
+		try {
+			[port, token] = await invoke<[number, string]>('get_backend');
+		} catch {}
+	}
 };
 ```
 
@@ -572,4 +591,3 @@ Checklist per stage: window opens → `backend-ready` fires → scripts page lis
 ---
 
 **Order matters:** the most common way this goes wrong is doing Phase 5 before Phase 2's standalone test passes, or fighting Tauri capability errors that are actually just the missing target-triple suffix. If you hit a wall, the first three things to check are: binary name suffix, capability `name` matching `externalBin` exactly, and whether `READY` is actually printed with `flush=True`.
-

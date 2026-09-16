@@ -248,7 +248,7 @@ cargo update --manifest-path src-tauri/Cargo.toml --dry-run
 | Cadence                           | What to update                              | Approach                                                                   |
 | --------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------- |
 | **Weekly**                        | `bun update` + `cargo update` (semver-safe) | Phase 1 only — should always pass                                          |
-| **Monthly**                       | `bunx npm-check-updates -u` (all latest)     | Phase 1, fallback to Phase 2                                               |
+| **Monthly**                       | `bunx npm-check-updates -u` (all latest)    | Phase 1, fallback to Phase 2                                               |
 | **On Tauri/Svelte major release** | Major version bump of core framework        | Phase 2 directly — expect breaking changes, read the migration guide first |
 
 ---
@@ -273,4 +273,3 @@ bun run test:unit                                               # Vitest (92 tes
 bun run test:rust                                               # Cargo test (9 tests)
 bun run test:watch                                              # Vitest in watch mode
 ```
-

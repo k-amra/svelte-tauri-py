@@ -263,4 +263,3 @@ Rust tests live alongside the source code using `#[cfg(test)]` modules. They use
 
 - [WALKTHROUGH.md](./WALKTHROUGH.md) — Detailed record of what was implemented, files created/modified, and technical decisions.
 - [DEPENDENCY_UPDATE_GUIDE.md](./DEPENDENCY_UPDATE_GUIDE.md) — Step-by-step guide for safely updating dependencies.
-
