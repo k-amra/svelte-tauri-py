@@ -182,9 +182,12 @@ jobs:
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          SIGNING_REQUIRED: '1'
+          # Strict signing is opt-in via repo variable until Apple
+          # credentials exist; flip SIGNING_REQUIRED to '1' before shipping
+          # real releases. Never hard-code '0' and forget it.
+          SIGNING_REQUIRED: ${{ vars.SIGNING_REQUIRED || '0' }}
         run: |
-          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+          if [[ "${SIGNING_REQUIRED}" == "1" && -z "$APPLE_CERTIFICATE" ]]; then
             echo "::error::APPLE_CERTIFICATE is empty and SIGNING_REQUIRED=1 — refusing to ship an unsigned macOS build."
             exit 1
           fi
@@ -198,7 +201,8 @@ jobs:
         env:
           SIGN_COMMAND: ${{ secrets.SIGN_COMMAND }}
           # Fail the release if signing is not configured (never ship unsigned).
-          SIGNING_REQUIRED: '1'
+          # Strictness follows the SIGNING_REQUIRED repo variable (see above).
+          SIGNING_REQUIRED: ${{ vars.SIGNING_REQUIRED || '0' }}
         run: powershell -File scripts/sign-sidecar.ps1 -Triple ${{ matrix.target }}
       - name: Sign sidecar (macOS)
         if: startsWith(matrix.platform, 'macos')
@@ -206,7 +210,8 @@ jobs:
         env:
           IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           # Fail the release if signing is not configured (never ship unsigned).
-          SIGNING_REQUIRED: '1'
+          # Strictness follows the SIGNING_REQUIRED repo variable (see above).
+          SIGNING_REQUIRED: ${{ vars.SIGNING_REQUIRED || '0' }}
         run: bash scripts/sign-sidecar.sh ${{ matrix.target }}
 
       - name: Build Tauri
@@ -223,8 +228,9 @@ jobs:
           # Windows bundle signing via tauri.conf.json signCommand
           # (scripts/sign-bundle.ps1). Read only on Windows; elsewhere inert.
           # Fail the release if signing is not configured (never ship unsigned).
+          # Strictness follows the SIGNING_REQUIRED repo variable (see above).
           SIGN_COMMAND: ${{ secrets.SIGN_COMMAND }}
-          SIGNING_REQUIRED: '1'
+          SIGNING_REQUIRED: ${{ vars.SIGNING_REQUIRED || '0' }}
           # macOS app signing + notarization (tauri-action picks these up
           # automatically; empty secrets = unsigned, same as before).
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}

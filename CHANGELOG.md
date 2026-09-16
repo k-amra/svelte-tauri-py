@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.1 (2026-09-16)
+
+- Release pipeline: ASCII-only signing scripts, opt-in strict signing via `SIGNING_REQUIRED`, placeholder sidecar so static checks run before the slow PyInstaller build.
+
 ## 2.2.0 (2026-09-16)
 
 - Chat stats: per-channel isolated views with Pooled/Channel tabs covering the full metric set.

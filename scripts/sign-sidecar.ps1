@@ -1,7 +1,7 @@
 # Sign the sidecar exe BEFORE `tauri build` (Windows).
 # Requires: Azure Trusted Signing or an OV/EV code-signing cert.
 # Usage: powershell -File scripts/sign-sidecar.ps1
-# See plan.md installer §3: Tauri signs its own exe, you must sign api-server-*.exe yourself.
+# See plan.md installer section 3: Tauri signs its own exe, you must sign api-server-*.exe yourself.
 #
 # SIGN_COMMAND contract (read this):
 #   Must be a COMMAND LINE, not just a binary path. It is tokenized on
@@ -25,13 +25,13 @@ if (-not $Triple) {
   if (-not $Triple) { Write-Error "Cannot determine target triple"; exit 1 }
 }
 $exe = "src-tauri/binaries/api-server-$Triple.exe"
-if (-not (Test-Path $exe)) { Write-Error "Missing $exe — run build:sidecar first"; exit 1 }
+if (-not (Test-Path $exe)) { Write-Error "Missing $exe - run build:sidecar first"; exit 1 }
 if (-not $env:SIGN_COMMAND) {
   if ($env:SIGNING_REQUIRED -eq '1') {
-    Write-Error "SIGN_COMMAND not set and SIGNING_REQUIRED=1 — refusing to ship an unsigned sidecar."
+    Write-Error "SIGN_COMMAND not set and SIGNING_REQUIRED=1 - refusing to ship an unsigned sidecar."
     exit 1
   }
-  Write-Warning "SIGN_COMMAND not set — skipping sidecar signing (unsigned builds trigger SmartScreen)."
+  Write-Warning "SIGN_COMMAND not set - skipping sidecar signing (unsigned builds trigger SmartScreen)."
   exit 0
 }
 # Tokenize: `& "a b c" arg` treats the whole string as a command name and fails.
@@ -47,6 +47,6 @@ if ($parts.Count -gt 1) {
 }
 & $parts[0] @rest $exe
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "SIGN_COMMAND exited with code $LASTEXITCODE — sidecar is NOT signed."
+  Write-Error "SIGN_COMMAND exited with code $LASTEXITCODE - sidecar is NOT signed."
   exit $LASTEXITCODE
 }

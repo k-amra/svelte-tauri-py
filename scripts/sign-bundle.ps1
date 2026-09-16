@@ -12,10 +12,10 @@ if (-not $Target) { Write-Error "Missing target path argument (%1)."; exit 1 }
 if (-not (Test-Path $Target)) { Write-Error "Missing $Target."; exit 1 }
 if (-not $env:SIGN_COMMAND) {
   if ($env:SIGNING_REQUIRED -eq '1') {
-    Write-Error "SIGN_COMMAND not set and SIGNING_REQUIRED=1 — refusing to ship an unsigned bundle."
+    Write-Error "SIGN_COMMAND not set and SIGNING_REQUIRED=1 - refusing to ship an unsigned bundle."
     exit 1
   }
-  Write-Warning "SIGN_COMMAND not set — skipping bundle signing (unsigned builds trigger SmartScreen)."
+  Write-Warning "SIGN_COMMAND not set - skipping bundle signing (unsigned builds trigger SmartScreen)."
   exit 0
 }
 # Tokenize: `& "a b c" arg` treats the whole string as a command name and fails.
@@ -31,6 +31,6 @@ if ($parts.Count -gt 1) {
 }
 & $parts[0] @rest $Target
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "SIGN_COMMAND exited with code $LASTEXITCODE — bundle artifact is NOT signed: $Target."
+  Write-Error "SIGN_COMMAND exited with code $LASTEXITCODE - bundle artifact is NOT signed: $Target."
   exit $LASTEXITCODE
 }
