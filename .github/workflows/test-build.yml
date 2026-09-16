@@ -71,6 +71,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      # tauri_build::build() (invoked by src-tauri/build.rs) validates that
+      # every externalBin entry exists BEFORE clippy/test can compile the
+      # crate. The real sidecar is built later (PyInstaller is slow), so seed
+      # a placeholder here; build:sidecar overwrites it before `tauri build`.
+      # The triple carries the OS, so derive the Windows .exe suffix from it
+      # (tauri_build demands api-server-<triple>.exe on Windows, extensionless
+      # elsewhere — mirroring build-sidecar.mjs).
+      - name: Seed placeholder sidecar (for fmt/clippy/test)
+        run: |
+          triple="$(rustc --print host-tuple)"
+          mkdir -p src-tauri/binaries
+          touch "src-tauri/binaries/api-server-${triple}"
+          if [[ "$triple" == *-windows-* ]]; then
+            touch "src-tauri/binaries/api-server-${triple}.exe"
+          fi
+          chmod +x src-tauri/binaries/api-server-*
+
       - name: Rust format check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
