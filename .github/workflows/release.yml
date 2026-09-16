@@ -214,6 +214,34 @@ jobs:
           SIGNING_REQUIRED: ${{ vars.SIGNING_REQUIRED || '0' }}
         run: bash scripts/sign-sidecar.sh ${{ matrix.target }}
 
+      # Apple signing env, set ONLY when a certificate is configured. Empty
+      # secrets expand to empty strings, which Tauri reads as "signing
+      # enabled" and then fails in `security import` — so these must never
+      # be set unconditionally (see the secrets check above for the same).
+      - name: Enable Apple signing env (macOS, only when configured)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_NAME: ${{ secrets.APPLE_TEAM_NAME }}
+        run: |
+          if [[ -n "$APPLE_CERTIFICATE" ]]; then
+            {
+              echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+              echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+              echo "APPLE_ID=$APPLE_ID"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+              echo "APPLE_TEAM_NAME=$APPLE_TEAM_NAME"
+            } >> "$GITHUB_ENV"
+          else
+            echo "APPLE_CERTIFICATE unset — macOS build will be unsigned."
+          fi
+
       - name: Build Tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1 tip 2026-06-29; Renovate manages bumps
         env:
@@ -231,14 +259,6 @@ jobs:
           # Strictness follows the SIGNING_REQUIRED repo variable (see above).
           SIGN_COMMAND: ${{ secrets.SIGN_COMMAND }}
           SIGNING_REQUIRED: ${{ vars.SIGNING_REQUIRED || '0' }}
-          # macOS app signing + notarization (tauri-action picks these up
-          # automatically; empty secrets = unsigned, same as before).
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_NAME: ${{ secrets.APPLE_TEAM_NAME }}
         with:
           tagName: ${{ needs.validate-release.outputs.tag }}
           releaseName: ${{ needs.validate-release.outputs.tag }}

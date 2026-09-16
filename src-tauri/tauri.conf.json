@@ -30,8 +30,11 @@
 			"signCommand": {
 				"cmd": "powershell",
 				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy",
+					"Bypass",
 					"-File",
-					"scripts/sign-bundle.ps1",
+					"..\\scripts\\sign-bundle.ps1",
 					"%1"
 				]
 			}
